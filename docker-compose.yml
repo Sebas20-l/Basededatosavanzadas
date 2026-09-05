@@ -1,0 +1,17 @@
+version: "3.8"
+
+services:
+  mongodb:
+    image: mongo:8.0
+    container_name: pyr-mongodb
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    environment:
+      MONGO_INITDB_DATABASE: pide_y_recoge
+
+volumes:
+  mongo_data:
+    driver: local

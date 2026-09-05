@@ -1,0 +1,54 @@
+type Usuario {
+  id: ID!
+  nombre: String!
+  correo: String!
+}
+
+type Producto {
+  id: ID!
+  nombre: String!
+  precio: Float!
+  disponible: Boolean!
+}
+
+type ItemPedido {
+  productoId: ID!
+  nombreProducto: String!
+  precioUnitario: Float!
+  cantidad: Int!
+}
+
+type Pedido {
+  id: ID!
+  usuarioId: ID!
+  items: [ItemPedido!]!
+  total: Float!
+  estado: String!
+}
+
+# Reporte generado por el pipeline de agregacion
+type ProductoMasVendido {
+  nombreProducto: String!
+  unidadesVendidas: Int!
+  ingresosTotales: Float!
+}
+
+input ItemPedidoInput {
+  productoId: ID!
+  cantidad: Int!
+}
+
+type Query {
+  productos: [Producto!]!
+  producto(id: ID!): Producto
+  pedido(id: ID!): Pedido
+  pedidosPorUsuario(usuarioId: ID!): [Pedido!]!
+  productosMasVendidos: [ProductoMasVendido!]!
+}
+
+type Mutation {
+  registrarUsuario(nombre: String!, correo: String!): Usuario!
+  registrarProducto(nombre: String!, precio: Float!, disponible: Boolean): Producto!
+  crearPedido(usuarioId: ID!, items: [ItemPedidoInput!]!): Pedido!
+  actualizarEstadoPedido(pedidoId: ID!, nuevoEstado: String!): Pedido!
+}
