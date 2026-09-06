@@ -10,7 +10,7 @@ services:
     volumes:
       - mongo_data:/data/db
     environment:
-      MONGO_INITDB_DATABASE: pide_y_recoge
+      MONGO_INITDB_DATABASE: cafe_online
 
 volumes:
   mongo_data:
