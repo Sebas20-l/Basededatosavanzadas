@@ -1,7 +1,15 @@
+type Cafeteria {
+  id: ID!
+  nombre: String!
+  escuela: String!
+  activa: Boolean!
+}
+
 type Usuario {
   id: ID!
   nombre: String!
   correo: String!
+  cafeteriaId: ID!
 }
 
 type Producto {
@@ -9,6 +17,7 @@ type Producto {
   nombre: String!
   precio: Float!
   disponible: Boolean!
+  cafeteriaId: ID!
 }
 
 type ItemPedido {
@@ -21,12 +30,13 @@ type ItemPedido {
 type Pedido {
   id: ID!
   usuarioId: ID!
+  cafeteriaId: ID!
   items: [ItemPedido!]!
   total: Float!
   estado: String!
 }
 
-# Reporte generado por el pipeline de agregacion
+# Reporte generado por el pipeline de agregacion, siempre acotado a una cafeteria
 type ProductoMasVendido {
   nombreProducto: String!
   unidadesVendidas: Int!
@@ -39,16 +49,23 @@ input ItemPedidoInput {
 }
 
 type Query {
-  productos: [Producto!]!
+  cafeterias: [Cafeteria!]!
+  cafeteria(id: ID!): Cafeteria
+
+  productosPorCafeteria(cafeteriaId: ID!): [Producto!]!
   producto(id: ID!): Producto
+
   pedido(id: ID!): Pedido
   pedidosPorUsuario(usuarioId: ID!): [Pedido!]!
-  productosMasVendidos: [ProductoMasVendido!]!
+  pedidosPorCafeteria(cafeteriaId: ID!): [Pedido!]!
+
+  productosMasVendidos(cafeteriaId: ID!): [ProductoMasVendido!]!
 }
 
 type Mutation {
-  registrarUsuario(nombre: String!, correo: String!): Usuario!
-  registrarProducto(nombre: String!, precio: Float!, disponible: Boolean): Producto!
-  crearPedido(usuarioId: ID!, items: [ItemPedidoInput!]!): Pedido!
+  registrarCafeteria(nombre: String!, escuela: String!): Cafeteria!
+  registrarUsuario(nombre: String!, correo: String!, cafeteriaId: ID!): Usuario!
+  registrarProducto(nombre: String!, precio: Float!, disponible: Boolean, cafeteriaId: ID!): Producto!
+  crearPedido(usuarioId: ID!, cafeteriaId: ID!, items: [ItemPedidoInput!]!): Pedido!
   actualizarEstadoPedido(pedidoId: ID!, nuevoEstado: String!): Pedido!
 }

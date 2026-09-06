@@ -1,18 +1,35 @@
-import { UsuarioModel, ProductoModel, PedidoModel } from "../infrastructure/mongoose-models.js";
+import mongoose from "mongoose";
+import {
+  CafeteriaModel,
+  UsuarioModel,
+  ProductoModel,
+  PedidoModel
+} from "../infrastructure/mongoose-models.js";
 import { Producto, ItemPedido, Pedido } from "../domain/entities.js";
 
+function mapCafeteria(doc) {
+  return { id: doc._id, nombre: doc.nombre, escuela: doc.escuela, activa: doc.activa };
+}
+
 function mapUsuario(doc) {
-  return { id: doc._id, nombre: doc.nombre, correo: doc.correo };
+  return { id: doc._id, nombre: doc.nombre, correo: doc.correo, cafeteriaId: doc.cafeteriaId };
 }
 
 function mapProducto(doc) {
-  return { id: doc._id, nombre: doc.nombre, precio: doc.precio, disponible: doc.disponible };
+  return {
+    id: doc._id,
+    nombre: doc.nombre,
+    precio: doc.precio,
+    disponible: doc.disponible,
+    cafeteriaId: doc.cafeteriaId
+  };
 }
 
 function mapPedido(doc) {
   return {
     id: doc._id,
     usuarioId: doc.usuarioId,
+    cafeteriaId: doc.cafeteriaId,
     items: doc.items,
     total: doc.total,
     estado: doc.estado
@@ -21,8 +38,18 @@ function mapPedido(doc) {
 
 export const resolvers = {
   Query: {
-    productos: async () => {
-      const docs = await ProductoModel.find({});
+    cafeterias: async () => {
+      const docs = await CafeteriaModel.find({});
+      return docs.map(mapCafeteria);
+    },
+
+    cafeteria: async (_, { id }) => {
+      const doc = await CafeteriaModel.findById(id);
+      return doc ? mapCafeteria(doc) : null;
+    },
+
+    productosPorCafeteria: async (_, { cafeteriaId }) => {
+      const docs = await ProductoModel.find({ cafeteriaId });
       return docs.map(mapProducto);
     },
 
@@ -41,12 +68,23 @@ export const resolvers = {
       return docs.map(mapPedido);
     },
 
-    // Pipeline de agregacion: productos mas vendidos, calculado
-    // directamente en MongoDB, sin traer todos los pedidos a Node.js.
-    productosMasVendidos: async () => {
+    pedidosPorCafeteria: async (_, { cafeteriaId }) => {
+      const docs = await PedidoModel.find({ cafeteriaId });
+      return docs.map(mapPedido);
+    },
+
+    // Pipeline de agregacion: productos mas vendidos DENTRO de una cafeteria
+    // especifica. El $match filtra desde el inicio para no mezclar datos
+    // de distintas escuelas/cafeterias entre si (multi-tenant).
+    productosMasVendidos: async (_, { cafeteriaId }) => {
       const resultado = await PedidoModel.aggregate([
-        // Etapa 1: solo pedidos que ya se entregaron cuentan como venta real
-        { $match: { estado: "ENTREGADO" } },
+        // Etapa 1: solo pedidos entregados de ESTA cafeteria
+        {
+          $match: {
+            cafeteriaId: new mongoose.Types.ObjectId(cafeteriaId),
+            estado: "ENTREGADO"
+          }
+        },
         // Etapa 2: aplanar el arreglo de items incrustado
         { $unwind: "$items" },
         // Etapa 3: agrupar por producto y acumular metricas
@@ -72,24 +110,49 @@ export const resolvers = {
   },
 
   Mutation: {
-    registrarUsuario: async (_, { nombre, correo }) => {
-      const doc = await new UsuarioModel({ nombre, correo }).save();
+    registrarCafeteria: async (_, { nombre, escuela }) => {
+      const doc = await new CafeteriaModel({ nombre, escuela }).save();
+      return mapCafeteria(doc);
+    },
+
+    registrarUsuario: async (_, { nombre, correo, cafeteriaId }) => {
+      const cafeteria = await CafeteriaModel.findById(cafeteriaId);
+      if (!cafeteria) {
+        throw new Error("La cafeteria indicada no existe.");
+      }
+
+      const doc = await new UsuarioModel({ nombre, correo, cafeteriaId }).save();
       return mapUsuario(doc);
     },
 
-    registrarProducto: async (_, { nombre, precio, disponible }) => {
+    registrarProducto: async (_, { nombre, precio, disponible, cafeteriaId }) => {
+      const cafeteria = await CafeteriaModel.findById(cafeteriaId);
+      if (!cafeteria) {
+        throw new Error("La cafeteria indicada no existe.");
+      }
+
       // Validacion de dominio antes de persistir
       const productoDominio = new Producto(null, nombre, precio, disponible ?? true);
       productoDominio.validarPrecioPositivo();
 
-      const doc = await new ProductoModel({ nombre, precio, disponible: disponible ?? true }).save();
+      const doc = await new ProductoModel({
+        nombre,
+        precio,
+        disponible: disponible ?? true,
+        cafeteriaId
+      }).save();
+
       return mapProducto(doc);
     },
 
-    crearPedido: async (_, { usuarioId, items }) => {
+    crearPedido: async (_, { usuarioId, cafeteriaId, items }) => {
       const usuario = await UsuarioModel.findById(usuarioId);
       if (!usuario) {
         throw new Error("El usuario no existe.");
+      }
+      // Regla multi-tenant: el usuario debe pertenecer a la cafeteria del pedido
+      if (String(usuario.cafeteriaId) !== String(cafeteriaId)) {
+        throw new Error("El usuario no pertenece a esta cafeteria.");
       }
 
       // Construir los items reales consultando precio y disponibilidad actual
@@ -98,6 +161,10 @@ export const resolvers = {
         const producto = await ProductoModel.findById(entrada.productoId);
         if (!producto) {
           throw new Error(`El producto ${entrada.productoId} no existe.`);
+        }
+        // Regla multi-tenant: no se pueden mezclar productos de otra cafeteria
+        if (String(producto.cafeteriaId) !== String(cafeteriaId)) {
+          throw new Error(`El producto "${producto.nombre}" no pertenece a esta cafeteria.`);
         }
         if (!producto.disponible) {
           throw new Error(`El producto "${producto.nombre}" no está disponible.`);
@@ -116,6 +183,7 @@ export const resolvers = {
 
       const doc = await new PedidoModel({
         usuarioId,
+        cafeteriaId,
         items: itemsPedido.map(i => ({
           productoId: i.productoId,
           nombreProducto: i.nombreProducto,
