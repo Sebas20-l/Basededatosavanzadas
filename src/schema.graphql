@@ -1,8 +1,51 @@
+# ---------------------------------------------------------------
+# Catalogos
+# ---------------------------------------------------------------
+
+type Moneda {
+  id: ID!
+  codigo: String!
+  nombre: String!
+  simbolo: String!
+  decimales: Int!
+  activa: Boolean!
+}
+
+type EstadoPedido {
+  id: ID!
+  clave: String!
+  nombre: String!
+  orden: Int!
+  esInicial: Boolean!
+  esFinal: Boolean!
+  # Claves de los estados a los que se puede pasar desde este
+  transiciones: [String!]!
+}
+
+type Escuela {
+  id: ID!
+  # Identificador legible y unico, ademas del id (ej. "ULSA")
+  clave: String!
+  nombre: String!
+  activa: Boolean!
+}
+
 type Cafeteria {
   id: ID!
   nombre: String!
-  escuela: String!
+  escuelaId: ID!
+  escuela: Escuela!
   activa: Boolean!
+}
+
+# ---------------------------------------------------------------
+# Datos del negocio
+# ---------------------------------------------------------------
+
+# Un monto siempre viaja con su moneda (codigo del catalogo: MXN, USD, JPY...)
+type Dinero {
+  monto: Float!
+  moneda: String!
 }
 
 type Usuario {
@@ -12,18 +55,27 @@ type Usuario {
   cafeteriaId: ID!
 }
 
+type Inventario {
+  stock: Int!
+  puntoReorden: Int!
+  cantidadReposicion: Int!
+  # true cuando stock <= puntoReorden
+  requiereReposicion: Boolean!
+}
+
 type Producto {
   id: ID!
   nombre: String!
-  precio: Float!
+  precio: Dinero!
   disponible: Boolean!
+  inventario: Inventario!
   cafeteriaId: ID!
 }
 
 type ItemPedido {
   productoId: ID!
   nombreProducto: String!
-  precioUnitario: Float!
+  precioUnitario: Dinero!
   cantidad: Int!
 }
 
@@ -32,15 +84,28 @@ type Pedido {
   usuarioId: ID!
   cafeteriaId: ID!
   items: [ItemPedido!]!
-  total: Float!
+  total: Dinero!
+  # Clave del catalogo de estados (ej. "PENDIENTE")
   estado: String!
 }
 
-# Reporte generado por el pipeline de agregacion, siempre acotado a una cafeteria
+# Reporte generado por el pipeline de agregacion, siempre acotado a una cafeteria.
+# Se agrupa por producto Y moneda, para no sumar monedas distintas entre si.
 type ProductoMasVendido {
   nombreProducto: String!
   unidadesVendidas: Int!
-  ingresosTotales: Float!
+  ingresosTotales: Dinero!
+}
+
+input DineroInput {
+  monto: Float!
+  moneda: String!
+}
+
+input InventarioInput {
+  stock: Int!
+  puntoReorden: Int!
+  cantidadReposicion: Int!
 }
 
 input ItemPedidoInput {
@@ -49,11 +114,21 @@ input ItemPedidoInput {
 }
 
 type Query {
+  monedas: [Moneda!]!
+  estadosPedido: [EstadoPedido!]!
+
+  escuelas: [Escuela!]!
+  escuela(id: ID!): Escuela
+  escuelaPorClave(clave: String!): Escuela
+
   cafeterias: [Cafeteria!]!
   cafeteria(id: ID!): Cafeteria
+  cafeteriasPorEscuela(escuelaId: ID!): [Cafeteria!]!
 
   productosPorCafeteria(cafeteriaId: ID!): [Producto!]!
   producto(id: ID!): Producto
+  # Productos cuyo stock ya llego al punto de reorden
+  productosPorReponer(cafeteriaId: ID!): [Producto!]!
 
   pedido(id: ID!): Pedido
   pedidosPorUsuario(usuarioId: ID!): [Pedido!]!
@@ -63,9 +138,22 @@ type Query {
 }
 
 type Mutation {
-  registrarCafeteria(nombre: String!, escuela: String!): Cafeteria!
+  registrarMoneda(codigo: String!, nombre: String!, simbolo: String!, decimales: Int = 2): Moneda!
+  registrarEscuela(clave: String!, nombre: String!): Escuela!
+  registrarCafeteria(nombre: String!, escuelaId: ID!): Cafeteria!
   registrarUsuario(nombre: String!, correo: String!, cafeteriaId: ID!): Usuario!
-  registrarProducto(nombre: String!, precio: Float!, disponible: Boolean, cafeteriaId: ID!): Producto!
+  registrarProducto(
+    nombre: String!
+    precio: DineroInput!
+    disponible: Boolean
+    inventario: InventarioInput!
+    cafeteriaId: ID!
+  ): Producto!
+
+  # Suma stock. Si no se indica cantidad, usa la cantidadReposicion del producto.
+  reponerInventario(productoId: ID!, cantidad: Int): Producto!
+
+  # Descuenta el stock de cada producto dentro de una transaccion
   crearPedido(usuarioId: ID!, cafeteriaId: ID!, items: [ItemPedidoInput!]!): Pedido!
   actualizarEstadoPedido(pedidoId: ID!, nuevoEstado: String!): Pedido!
 }
