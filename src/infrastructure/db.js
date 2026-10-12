@@ -28,6 +28,7 @@ export async function conectarBaseDatos() {
   try {
     await mongoose.connect(mongoUri);
     console.log("MongoDB conectado correctamente:", ocultarCredenciales(mongoUri));
+    console.log("Base de datos en uso:", mongoose.connection.name);
   } catch (error) {
     console.error("No se pudo conectar a MongoDB:", error.message);
     process.exit(1);
