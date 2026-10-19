@@ -1,6 +1,6 @@
 import mongoose from "mongoose";
 
-const mongoUri = process.env.MONGODB_URI || "mongodb://localhost:27017/pide_y_recoge";
+const mongoUri = process.env.MONGODB_URI || "mongodb://admin:password123@localhost:27017/pide_y_recoge?authSource=admin";
 
 // Atlas mete usuario y contrasena dentro de la cadena de conexion:
 // nunca se debe imprimir completa en la consola ni en los logs.

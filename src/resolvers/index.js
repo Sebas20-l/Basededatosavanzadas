@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import bcrypt from "bcryptjs";
 import {
   MonedaModel,
   EstadoPedidoModel,
@@ -16,6 +17,13 @@ import {
   ItemPedido,
   Pedido
 } from "../domain/entities.js";
+import { obtenerConCache, invalidarCache, clavesCache } from "../infrastructure/cache.js";
+import {
+  iniciarSesion,
+  cerrarSesion,
+  requerirSesion,
+  noAutorizado
+} from "../infrastructure/auth.js";
 
 // El reporte de mas vendidos solo cuenta pedidos con este estado del catalogo.
 // (No se usa "cualquier estado final" porque un futuro CANCELADO tambien seria final.)
@@ -130,12 +138,71 @@ async function obtenerEstadoDominio(clave) {
   return new EstadoPedido(doc.clave, doc.nombre, doc.transiciones, doc.esFinal);
 }
 
+// Borra del cache todo lo que depende del inventario de una cafeteria.
+async function invalidarProductos(cafeteriaId, productoIds = []) {
+  await invalidarCache(
+    clavesCache.productosPorCafeteria(cafeteriaId),
+    clavesCache.productosPorReponer(cafeteriaId),
+    ...productoIds.map(id => clavesCache.producto(id))
+  );
+}
+
 // Convierte el error crudo de "llave duplicada" de Mongo en un mensaje claro.
 function manejarDuplicado(error, mensaje) {
   if (error?.code === 11000) {
     throw new Error(mensaje);
   }
   throw error;
+}
+
+// Pipeline de agregacion: productos mas vendidos DENTRO de una cafeteria
+// especifica. El $match filtra desde el inicio para no mezclar datos
+// de distintas escuelas/cafeterias entre si (multi-tenant).
+async function calcularProductosMasVendidos(cafeteriaId) {
+  const resultado = await PedidoModel.aggregate([
+    // Etapa 1: solo pedidos completados de ESTA cafeteria
+    {
+      $match: {
+        cafeteriaId: new mongoose.Types.ObjectId(cafeteriaId),
+        estado: ESTADO_VENTA_COMPLETADA
+      }
+    },
+    // Etapa 2: aplanar el arreglo de items incrustado
+    { $unwind: "$items" },
+    // Etapa 3: agrupar por producto y moneda (nunca se suman monedas distintas)
+    {
+      $group: {
+        _id: {
+          nombreProducto: "$items.nombreProducto",
+          moneda: "$items.precioUnitario.moneda"
+        },
+        unidadesVendidas: { $sum: "$items.cantidad" },
+        ingresosTotales: {
+          $sum: { $multiply: ["$items.cantidad", "$items.precioUnitario.monto"] }
+        }
+      }
+    },
+    // Etapa 4: ordenar del mas vendido al menos vendido
+    { $sort: { unidadesVendidas: -1 } }
+  ]);
+
+  // Se redondean los ingresos segun los decimales de cada moneda.
+  const catalogo = await MonedaModel.find({});
+  const monedas = new Map(
+    catalogo.map(m => [m.codigo, new Moneda(m.codigo, m.simbolo, m.decimales)])
+  );
+
+  return resultado.map(item => {
+    const moneda = monedas.get(item._id.moneda);
+    return {
+      nombreProducto: item._id.nombreProducto,
+      unidadesVendidas: item.unidadesVendidas,
+      ingresosTotales: {
+        monto: moneda ? moneda.redondear(item.ingresosTotales) : item.ingresosTotales,
+        moneda: item._id.moneda
+      }
+    };
+  });
 }
 
 export const resolvers = {
@@ -151,16 +218,28 @@ export const resolvers = {
   },
 
   Query: {
-    // ---- Catalogos ----
-    monedas: async () => {
-      const docs = await MonedaModel.find({}).sort({ codigo: 1 });
-      return docs.map(mapMoneda);
+    // ---- Sesion ----
+    me: async (_, __, contexto) => {
+      const { usuarioId } = requerirSesion(contexto);
+      const doc = await UsuarioModel.findById(usuarioId);
+      if (!doc) {
+        throw noAutorizado("El usuario de la sesion ya no existe.");
+      }
+      return mapUsuario(doc);
     },
 
-    estadosPedido: async () => {
-      const docs = await EstadoPedidoModel.find({}).sort({ orden: 1 });
-      return docs.map(mapEstadoPedido);
-    },
+    // ---- Catalogos (cache-aside) ----
+    monedas: () =>
+      obtenerConCache(clavesCache.monedas(), async () => {
+        const docs = await MonedaModel.find({}).sort({ codigo: 1 });
+        return docs.map(mapMoneda);
+      }),
+
+    estadosPedido: () =>
+      obtenerConCache(clavesCache.estadosPedido(), async () => {
+        const docs = await EstadoPedidoModel.find({}).sort({ orden: 1 });
+        return docs.map(mapEstadoPedido);
+      }),
 
     escuelas: async () => {
       const docs = await EscuelaModel.find({}).sort({ nombre: 1 });
@@ -192,25 +271,28 @@ export const resolvers = {
       return docs.map(mapCafeteria);
     },
 
-    // ---- Productos e inventario ----
-    productosPorCafeteria: async (_, { cafeteriaId }) => {
-      const docs = await ProductoModel.find({ cafeteriaId });
-      return docs.map(mapProducto);
-    },
+    // ---- Productos e inventario (cache-aside) ----
+    productosPorCafeteria: (_, { cafeteriaId }) =>
+      obtenerConCache(clavesCache.productosPorCafeteria(cafeteriaId), async () => {
+        const docs = await ProductoModel.find({ cafeteriaId });
+        return docs.map(mapProducto);
+      }),
 
-    producto: async (_, { id }) => {
-      const doc = await ProductoModel.findById(id);
-      return doc ? mapProducto(doc) : null;
-    },
+    producto: (_, { id }) =>
+      obtenerConCache(clavesCache.producto(id), async () => {
+        const doc = await ProductoModel.findById(id);
+        return doc ? mapProducto(doc) : null;
+      }),
 
     // Productos que ya llegaron a su punto de reorden (stock <= puntoReorden).
-    productosPorReponer: async (_, { cafeteriaId }) => {
-      const docs = await ProductoModel.find({
-        cafeteriaId,
-        $expr: { $lte: ["$inventario.stock", "$inventario.puntoReorden"] }
-      });
-      return docs.map(mapProducto);
-    },
+    productosPorReponer: (_, { cafeteriaId }) =>
+      obtenerConCache(clavesCache.productosPorReponer(cafeteriaId), async () => {
+        const docs = await ProductoModel.find({
+          cafeteriaId,
+          $expr: { $lte: ["$inventario.stock", "$inventario.puntoReorden"] }
+        });
+        return docs.map(mapProducto);
+      }),
 
     // ---- Pedidos ----
     pedido: async (_, { id }) => {
@@ -228,62 +310,37 @@ export const resolvers = {
       return docs.map(mapPedido);
     },
 
-    // Pipeline de agregacion: productos mas vendidos DENTRO de una cafeteria
-    // especifica. El $match filtra desde el inicio para no mezclar datos
-    // de distintas escuelas/cafeterias entre si (multi-tenant).
-    productosMasVendidos: async (_, { cafeteriaId }) => {
-      const resultado = await PedidoModel.aggregate([
-        // Etapa 1: solo pedidos completados de ESTA cafeteria
-        {
-          $match: {
-            cafeteriaId: new mongoose.Types.ObjectId(cafeteriaId),
-            estado: ESTADO_VENTA_COMPLETADA
-          }
-        },
-        // Etapa 2: aplanar el arreglo de items incrustado
-        { $unwind: "$items" },
-        // Etapa 3: agrupar por producto y moneda (nunca se suman monedas distintas)
-        {
-          $group: {
-            _id: {
-              nombreProducto: "$items.nombreProducto",
-              moneda: "$items.precioUnitario.moneda"
-            },
-            unidadesVendidas: { $sum: "$items.cantidad" },
-            ingresosTotales: {
-              $sum: { $multiply: ["$items.cantidad", "$items.precioUnitario.monto"] }
-            }
-          }
-        },
-        // Etapa 4: ordenar del mas vendido al menos vendido
-        { $sort: { unidadesVendidas: -1 } }
-      ]);
-
-      // Se redondean los ingresos segun los decimales de cada moneda.
-      const catalogo = await MonedaModel.find({});
-      const monedas = new Map(
-        catalogo.map(m => [m.codigo, new Moneda(m.codigo, m.simbolo, m.decimales)])
-      );
-
-      return resultado.map(item => {
-        const moneda = monedas.get(item._id.moneda);
-        return {
-          nombreProducto: item._id.nombreProducto,
-          unidadesVendidas: item.unidadesVendidas,
-          ingresosTotales: {
-            monto: moneda ? moneda.redondear(item.ingresosTotales) : item.ingresosTotales,
-            moneda: item._id.moneda
-          }
-        };
-      });
-    }
+    // Reporte analitico (pipeline de agregacion), tambien con cache-aside
+    productosMasVendidos: (_, { cafeteriaId }) =>
+      obtenerConCache(clavesCache.productosMasVendidos(cafeteriaId), () =>
+        calcularProductosMasVendidos(cafeteriaId)
+      )
   },
 
   Mutation: {
+    // ---- Sesion ----
+    login: async (_, { correo, password }) => {
+      const doc = await UsuarioModel.findOne({ correo: correo.trim().toLowerCase() })
+        .select("+passwordHash");
+      // Mismo mensaje si no existe el correo o si la contrasena esta mal
+      const valido = doc?.passwordHash && (await bcrypt.compare(password, doc.passwordHash));
+      if (!valido) {
+        throw noAutorizado("Correo o contrasena incorrectos.");
+      }
+      const { token, expiraEn } = await iniciarSesion(doc._id);
+      return { token, expiraEn, usuario: mapUsuario(doc) };
+    },
+
+    logout: async (_, __, contexto) => {
+      const { jti } = requerirSesion(contexto);
+      return cerrarSesion(jti);
+    },
+
     // ---- Catalogos ----
     registrarMoneda: async (_, { codigo, nombre, simbolo, decimales }) => {
       try {
         const doc = await new MonedaModel({ codigo, nombre, simbolo, decimales }).save();
+        await invalidarCache(clavesCache.monedas());
         return mapMoneda(doc);
       } catch (error) {
         return manejarDuplicado(error, `Ya existe la moneda "${normalizarClave(codigo)}".`);
@@ -316,14 +373,22 @@ export const resolvers = {
       }
     },
 
-    registrarUsuario: async (_, { nombre, correo, cafeteriaId }) => {
+    registrarUsuario: async (_, { nombre, correo, password, cafeteriaId }) => {
       const cafeteria = await CafeteriaModel.findById(cafeteriaId);
       if (!cafeteria) {
         throw new Error("La cafeteria indicada no existe.");
       }
+      if (password.length < 6) {
+        throw new Error("La contrasena debe tener al menos 6 caracteres.");
+      }
 
-      const doc = await new UsuarioModel({ nombre, correo, cafeteriaId }).save();
-      return mapUsuario(doc);
+      try {
+        const passwordHash = await bcrypt.hash(password, 10);
+        const doc = await new UsuarioModel({ nombre, correo, passwordHash, cafeteriaId }).save();
+        return mapUsuario(doc);
+      } catch (error) {
+        return manejarDuplicado(error, `Ya existe un usuario con el correo "${correo}".`);
+      }
     },
 
     // ---- Productos e inventario ----
@@ -360,6 +425,7 @@ export const resolvers = {
         cafeteriaId
       }).save();
 
+      await invalidarProductos(cafeteriaId);
       return mapProducto(doc);
     },
 
@@ -382,6 +448,7 @@ export const resolvers = {
         { $inc: { "inventario.stock": unidades } },
         { new: true }
       );
+      await invalidarProductos(actualizado.cafeteriaId, [productoId]);
       return mapProducto(actualizado);
     },
 
@@ -495,6 +562,8 @@ export const resolvers = {
         await session.endSession();
       }
 
+      // El pedido desconto stock: lo cacheado de esos productos ya no es valido
+      await invalidarProductos(cafeteriaId, [...cantidades.keys()]);
       return mapPedido(pedidoGuardado);
     },
 
@@ -512,6 +581,8 @@ export const resolvers = {
 
       doc.estado = estadoNuevo.clave;
       const actualizado = await doc.save();
+      // El reporte de mas vendidos cuenta pedidos ENTREGADO: puede cambiar
+      await invalidarCache(clavesCache.productosMasVendidos(actualizado.cafeteriaId));
       return mapPedido(actualizado);
     }
   }

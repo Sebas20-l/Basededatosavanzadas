@@ -1,4 +1,5 @@
-// Carga los catalogos iniciales: monedas, estados de pedido y escuelas.
+// Carga los catalogos iniciales (monedas, estados de pedido, escuelas) y un
+// juego de datos de demo: una cafeteria, un usuario para login y productos.
 //
 //   npm run seed
 //
@@ -8,11 +9,17 @@
 
 import "dotenv/config";
 import mongoose from "mongoose";
+import bcrypt from "bcryptjs";
 import { conectarBaseDatos } from "./infrastructure/db.js";
+import { redisClient, conectarRedis } from "./infrastructure/redis.js";
+import { clavesCache } from "./infrastructure/cache.js";
 import {
   MonedaModel,
   EstadoPedidoModel,
-  EscuelaModel
+  EscuelaModel,
+  CafeteriaModel,
+  UsuarioModel,
+  ProductoModel
 } from "./infrastructure/mongoose-models.js";
 
 const monedas = [
@@ -87,5 +94,60 @@ const escuelasEnBase = await EscuelaModel.find({}).sort({ clave: 1 });
 for (const escuela of escuelasEnBase) {
   console.log(`  Escuela ${escuela.clave}: id = ${escuela._id}`);
 }
+
+// ---- Datos de demo (tambien repetibles) ----
+const DEMO_CORREO = "demo@ulsa.mx";
+const DEMO_PASSWORD = "demo123";
+
+const escuelaDemo = await EscuelaModel.findOne({ clave: escuelas[0].clave });
+const cafeteria = await CafeteriaModel.findOneAndUpdate(
+  { escuelaId: escuelaDemo._id, nombre: "Cafeteria Central" },
+  { $setOnInsert: { activa: true } },
+  { upsert: true, new: true }
+);
+
+await UsuarioModel.updateOne(
+  { correo: DEMO_CORREO },
+  {
+    $set: {
+      nombre: "Usuario Demo",
+      cafeteriaId: cafeteria._id,
+      passwordHash: await bcrypt.hash(DEMO_PASSWORD, 10)
+    }
+  },
+  { upsert: true }
+);
+
+const productosDemo = [
+  { nombre: "Cafe americano", monto: 35, stock: 50 },
+  { nombre: "Sandwich de pavo", monto: 65, stock: 4 },
+  { nombre: "Jugo de naranja", monto: 30, stock: 20 }
+];
+for (const p of productosDemo) {
+  await ProductoModel.updateOne(
+    { cafeteriaId: cafeteria._id, nombre: p.nombre },
+    {
+      $setOnInsert: {
+        precio: { monto: p.monto, moneda: "MXN" },
+        disponible: true,
+        inventario: { stock: p.stock, puntoReorden: 5, cantidadReposicion: 20 }
+      }
+    },
+    { upsert: true }
+  );
+}
+
+console.log(`  Cafeteria demo: id = ${cafeteria._id}`);
+console.log(`  Usuario demo: ${DEMO_CORREO} / ${DEMO_PASSWORD}`);
+
+// Los catalogos y productos pudieron cambiar: se limpia su cache en Redis
+await conectarRedis();
+await redisClient.del([
+  clavesCache.monedas(),
+  clavesCache.estadosPedido(),
+  clavesCache.productosPorCafeteria(cafeteria._id),
+  clavesCache.productosPorReponer(cafeteria._id)
+]);
+await redisClient.quit();
 
 await mongoose.disconnect();

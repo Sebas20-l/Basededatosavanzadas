@@ -92,7 +92,16 @@ const UsuarioSchema = new mongoose.Schema({
   correo: {
     type: String,
     required: [true, "El correo es obligatorio."],
-    unique: true
+    unique: true,
+    lowercase: true,
+    trim: true
+  },
+  // Hash bcrypt; nunca se guarda ni se devuelve la contrasena en claro.
+  // select: false evita que salga en consultas normales.
+  passwordHash: {
+    type: String,
+    required: [true, "El usuario necesita contrasena."],
+    select: false
   },
   cafeteriaId: {
     type: mongoose.Schema.Types.ObjectId,

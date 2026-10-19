@@ -97,6 +97,15 @@ type ProductoMasVendido {
   ingresosTotales: Dinero!
 }
 
+# Respuesta del login: el token se manda despues en
+#   Authorization: Bearer <token>
+type SesionPayload {
+  token: String!
+  # Segundos de vida del token y de la sesion en Redis (TTL)
+  expiraEn: Int!
+  usuario: Usuario!
+}
+
 input DineroInput {
   monto: Float!
   moneda: String!
@@ -114,6 +123,9 @@ input ItemPedidoInput {
 }
 
 type Query {
+  # Protegida: requiere Authorization: Bearer <token> con sesion activa en Redis
+  me: Usuario!
+
   monedas: [Moneda!]!
   estadosPedido: [EstadoPedido!]!
 
@@ -138,10 +150,15 @@ type Query {
 }
 
 type Mutation {
+  # Firma un JWT con jti (UUID) y guarda SET sesion:<jti> <userId> EX <ttl>
+  login(correo: String!, password: String!): SesionPayload!
+  # Protegida: borra sesion:<jti> en Redis, el token queda revocado al instante
+  logout: Boolean!
+
   registrarMoneda(codigo: String!, nombre: String!, simbolo: String!, decimales: Int = 2): Moneda!
   registrarEscuela(clave: String!, nombre: String!): Escuela!
   registrarCafeteria(nombre: String!, escuelaId: ID!): Cafeteria!
-  registrarUsuario(nombre: String!, correo: String!, cafeteriaId: ID!): Usuario!
+  registrarUsuario(nombre: String!, correo: String!, password: String!, cafeteriaId: ID!): Usuario!
   registrarProducto(
     nombre: String!
     precio: DineroInput!
