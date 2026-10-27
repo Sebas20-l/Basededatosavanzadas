@@ -297,6 +297,7 @@ Las lecturas desde Redis quedan **por debajo de 1.5 ms**.
 
 **Archivo:** [`src/infrastructure/auth.js`](../src/infrastructure/auth.js)
 
+- **Registro** (`mutation registrarUsuario`): normaliza nombre y correo, valida el formato del correo, exige una contraseña de al menos 6 caracteres y verifica que la cafetería exista y esté activa. La contraseña se guarda únicamente como hash bcrypt; el correo tiene índice único en MongoDB.
 - **Login** (`mutation login(correo, password)`): compara la contraseña con su hash `bcrypt` guardado en MongoDB. Si coincide, firma un JWT con `jti = crypto.randomUUID()` y registra la sesión:
   ```
   SET sesion:<jti> <userId> EX 3600
@@ -308,6 +309,26 @@ Las lecturas desde Redis quedan **por debajo de 1.5 ms**.
   3. Comprueba que `sesion:<jti>` **siga existiendo en Redis** y que corresponda al mismo usuario.
   4. Si cualquiera de estas validaciones falla, **se rechaza toda la petición** con `UNAUTHENTICATED` y **HTTP 401**.
 - **`query me`** está protegida: sin una sesión válida responde 401.
+
+Para registrar una cuenta, primero consulta `cafeterias` y utiliza el `id` de una cafetería activa. Después inicia sesión con el correo y la contraseña registrados:
+
+```graphql
+mutation {
+  registrarUsuario(
+    nombre: "Ana Ejemplo"
+    correo: "ana@ejemplo.mx"
+    password: "clave123"
+    cafeteriaId: "ID_DE_CAFETERIA"
+  ) {
+    id
+    nombre
+    correo
+    cafeteriaId
+  }
+}
+```
+
+La respuesta no incluye la contraseña ni su hash. El registro y el inicio de sesión son operaciones separadas: tras el registro, ejecuta `login(correo, password)` para recibir el token de sesión.
 
 ```js
 const usuarioEnSesion = await redisClient.get(`sesion:${payload.jti}`);

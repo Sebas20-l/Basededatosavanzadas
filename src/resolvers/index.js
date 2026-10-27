@@ -1,5 +1,6 @@
 import mongoose from "mongoose";
 import bcrypt from "bcryptjs";
+import { GraphQLError } from "graphql";
 import {
   MonedaModel,
   EstadoPedidoModel,
@@ -116,6 +117,12 @@ function mapPedido(doc) {
 // Helpers
 // -------------------------------------------------
 const normalizarClave = valor => String(valor).trim().toUpperCase();
+
+function entradaInvalida(mensaje) {
+  return new GraphQLError(mensaje, {
+    extensions: { code: "BAD_USER_INPUT" }
+  });
+}
 
 // Lee una moneda del catalogo y la convierte en objeto de dominio.
 async function obtenerMonedaDominio(codigo) {
@@ -320,9 +327,11 @@ export const resolvers = {
   Mutation: {
     // ---- Sesion ----
     login: async (_, { correo, password }) => {
-      const doc = await UsuarioModel.findOne({ correo: correo.trim().toLowerCase() })
+      // Se aplica la misma normalizacion usada al registrar la cuenta.
+      const correoNormalizado = correo.trim().toLowerCase();
+      const doc = await UsuarioModel.findOne({ correo: correoNormalizado })
         .select("+passwordHash");
-      // Mismo mensaje si no existe el correo o si la contrasena esta mal
+      // No revela si fallo el correo o la contrasena; compara contra el hash guardado.
       const valido = doc?.passwordHash && (await bcrypt.compare(password, doc.passwordHash));
       if (!valido) {
         throw noAutorizado("Correo o contrasena incorrectos.");
@@ -374,20 +383,47 @@ export const resolvers = {
     },
 
     registrarUsuario: async (_, { nombre, correo, password, cafeteriaId }) => {
+      // Canonicalizar el correo antes de validar y guardar evita cuentas duplicadas por mayusculas.
+      const nombreNormalizado = nombre.trim();
+      const correoNormalizado = correo.trim().toLowerCase();
+
+      if (!nombreNormalizado) {
+        throw entradaInvalida("El nombre no puede estar vacio.");
+      }
+      if (
+        correoNormalizado.length > 254 ||
+        !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(correoNormalizado)
+      ) {
+        throw entradaInvalida("Debes proporcionar un correo electronico valido.");
+      }
+      // Mantener la regla minima antes de generar el hash bcrypt.
+      if (password.length < 6) {
+        throw entradaInvalida("La contrasena debe tener al menos 6 caracteres.");
+      }
+      if (!mongoose.isValidObjectId(cafeteriaId)) {
+        throw entradaInvalida("El identificador de cafeteria no es valido.");
+      }
+
       const cafeteria = await CafeteriaModel.findById(cafeteriaId);
       if (!cafeteria) {
-        throw new Error("La cafeteria indicada no existe.");
+        throw entradaInvalida("La cafeteria indicada no existe.");
       }
-      if (password.length < 6) {
-        throw new Error("La contrasena debe tener al menos 6 caracteres.");
+      if (!cafeteria.activa) {
+        throw entradaInvalida("La cafeteria indicada esta inactiva.");
       }
 
       try {
+        // Nunca persistir la contrasena en texto claro.
         const passwordHash = await bcrypt.hash(password, 10);
-        const doc = await new UsuarioModel({ nombre, correo, passwordHash, cafeteriaId }).save();
+        const doc = await new UsuarioModel({
+          nombre: nombreNormalizado,
+          correo: correoNormalizado,
+          passwordHash,
+          cafeteriaId
+        }).save();
         return mapUsuario(doc);
       } catch (error) {
-        return manejarDuplicado(error, `Ya existe un usuario con el correo "${correo}".`);
+        return manejarDuplicado(error, `Ya existe un usuario con el correo "${correoNormalizado}".`);
       }
     },
 
