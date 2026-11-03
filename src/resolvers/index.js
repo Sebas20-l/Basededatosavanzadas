@@ -92,6 +92,11 @@ function mapProducto(doc) {
     precio: mapDinero(doc.precio),
     disponible: doc.disponible,
     inventario: mapInventario(doc.inventario),
+    descripcion: doc.descripcion ?? "",
+    categoria: doc.categoria || "Menu",
+    imagenUrl: doc.imagenUrl || null,
+    destacado: doc.destacado ?? false,
+    etiqueta: doc.etiqueta ?? "",
     cafeteriaId: doc.cafeteriaId
   };
 }
@@ -392,7 +397,10 @@ export const resolvers = {
     },
 
     // ---- Productos e inventario ----
-    registrarProducto: async (_, { nombre, precio, disponible, inventario, cafeteriaId }) => {
+    registrarProducto: async (_, {
+      nombre, precio, disponible, inventario, cafeteriaId,
+      descripcion, categoria, imagenUrl, destacado, etiqueta
+    }) => {
       const cafeteria = await CafeteriaModel.findById(cafeteriaId);
       if (!cafeteria) {
         throw new Error("La cafeteria indicada no existe.");
@@ -422,6 +430,11 @@ export const resolvers = {
           puntoReorden: inventario.puntoReorden,
           cantidadReposicion: inventario.cantidadReposicion
         },
+        descripcion,
+        categoria,
+        imagenUrl,
+        destacado,
+        etiqueta,
         cafeteriaId
       }).save();
 

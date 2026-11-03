@@ -118,10 +118,25 @@ await UsuarioModel.updateOne(
   { upsert: true }
 );
 
+// Para agregar productos al menu, agrega una fila aqui y corre `npm run seed`.
+// imagenUrl: pega la URL de la imagen de Cloudinary (Media Library > Copy URL).
+// Si la dejas vacia, la app muestra el producto sin imagen.
 const productosDemo = [
-  { nombre: "Cafe americano", monto: 35, stock: 50 },
-  { nombre: "Sandwich de pavo", monto: 65, stock: 4 },
-  { nombre: "Jugo de naranja", monto: 30, stock: 20 }
+  {
+    nombre: "Cafe americano", monto: 35, stock: 50,
+    descripcion: "Cafe de filtro recien hecho.",
+    categoria: "Bebidas", imagenUrl: "", destacado: true, etiqueta: "Mas vendido"
+  },
+  {
+    nombre: "Sandwich de pavo", monto: 65, stock: 4,
+    descripcion: "Pavo, queso y vegetales en pan de caja.",
+    categoria: "Alimentos", imagenUrl: "", destacado: false, etiqueta: ""
+  },
+  {
+    nombre: "Jugo de naranja", monto: 30, stock: 20,
+    descripcion: "Jugo natural de naranja.",
+    categoria: "Bebidas", imagenUrl: "", destacado: false, etiqueta: ""
+  }
 ];
 for (const p of productosDemo) {
   await ProductoModel.updateOne(
@@ -131,6 +146,14 @@ for (const p of productosDemo) {
         precio: { monto: p.monto, moneda: "MXN" },
         disponible: true,
         inventario: { stock: p.stock, puntoReorden: 5, cantidadReposicion: 20 }
+      },
+      // Datos del menu: se actualizan en cada seed (tambien en productos que ya existian)
+      $set: {
+        descripcion: p.descripcion,
+        categoria: p.categoria,
+        imagenUrl: p.imagenUrl,
+        destacado: p.destacado,
+        etiqueta: p.etiqueta
       }
     },
     { upsert: true }

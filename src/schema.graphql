@@ -69,6 +69,12 @@ type Producto {
   precio: Dinero!
   disponible: Boolean!
   inventario: Inventario!
+  descripcion: String!
+  categoria: String!
+  # URL de Cloudinary; null si el producto aun no tiene imagen
+  imagenUrl: String
+  destacado: Boolean!
+  etiqueta: String!
   cafeteriaId: ID!
 }
 
@@ -165,6 +171,11 @@ type Mutation {
     disponible: Boolean
     inventario: InventarioInput!
     cafeteriaId: ID!
+    descripcion: String
+    categoria: String
+    imagenUrl: String
+    destacado: Boolean
+    etiqueta: String
   ): Producto!
 
   # Suma stock. Si no se indica cantidad, usa la cantidadReposicion del producto.
