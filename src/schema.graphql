@@ -135,6 +135,9 @@ type Query {
   monedas: [Moneda!]!
   estadosPedido: [EstadoPedido!]!
 
+    # Texto de terminos y condiciones en formato markdown (publico, no requiere sesion)
+  terminos: String!
+
   escuelas: [Escuela!]!
   escuela(id: ID!): Escuela
   escuelaPorClave(clave: String!): Escuela

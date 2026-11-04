@@ -1,6 +1,11 @@
 import mongoose from "mongoose";
 import bcrypt from "bcryptjs";
 import { GraphQLError } from "graphql";
+import { readFileSync } from "fs";
+import { fileURLToPath } from "url";
+import path from "path";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 import {
   MonedaModel,
   EstadoPedidoModel,
@@ -277,6 +282,8 @@ export const resolvers = {
 
   Query: {
     // ---- Sesion ----
+        terminos: () =>
+      readFileSync(path.join(__dirname, "../contenido/terminos.md"), "utf8"),
     me: async (_, __, contexto) => {
       const { usuarioId } = requerirSesion(contexto);
       const doc = await UsuarioModel.findById(usuarioId);
