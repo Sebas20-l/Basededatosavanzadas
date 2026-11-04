@@ -160,6 +160,9 @@ type Mutation {
   login(correo: String!, password: String!): SesionPayload!
   # Protegida: borra sesion:<jti> en Redis, el token queda revocado al instante
   logout: Boolean!
+  # Registro publico desde la app: crea el usuario y ya devuelve su sesion
+  # (mismo resultado que login, para no pedir la contrasena dos veces)
+  registro(nombre: String!, correo: String!, password: String!, cafeteriaId: ID!): SesionPayload!
 
   registrarMoneda(codigo: String!, nombre: String!, simbolo: String!, decimales: Int = 2): Moneda!
   registrarEscuela(clave: String!, nombre: String!): Escuela!

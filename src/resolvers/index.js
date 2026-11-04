@@ -1,5 +1,6 @@
 import mongoose from "mongoose";
 import bcrypt from "bcryptjs";
+import { GraphQLError } from "graphql";
 import {
   MonedaModel,
   EstadoPedidoModel,
@@ -158,6 +159,58 @@ function manejarDuplicado(error, mensaje) {
     throw new Error(mensaje);
   }
   throw error;
+}
+
+// Error de validacion que la app puede mostrar tal cual.
+function datoInvalido(mensaje) {
+  return new GraphQLError(mensaje, { extensions: { code: "BAD_USER_INPUT" } });
+}
+
+const FORMATO_CORREO = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const PASSWORD_MIN = 6;
+
+// Valida los datos y crea el usuario. La usan registrarUsuario y registro.
+async function crearUsuario({ nombre, correo, password, cafeteriaId }) {
+  const nombreLimpio = String(nombre).trim();
+  const correoLimpio = String(correo).trim().toLowerCase();
+
+  if (!nombreLimpio) {
+    throw datoInvalido("El nombre es obligatorio.");
+  }
+  if (!FORMATO_CORREO.test(correoLimpio)) {
+    throw datoInvalido("El correo no tiene un formato valido.");
+  }
+  if (password.length < PASSWORD_MIN) {
+    throw datoInvalido(`La contrasena debe tener al menos ${PASSWORD_MIN} caracteres.`);
+  }
+  if (!mongoose.isValidObjectId(cafeteriaId)) {
+    throw datoInvalido("La cafeteria indicada no existe.");
+  }
+
+  const cafeteria = await CafeteriaModel.findById(cafeteriaId);
+  if (!cafeteria) {
+    throw datoInvalido("La cafeteria indicada no existe.");
+  }
+  if (!cafeteria.activa) {
+    throw datoInvalido("La cafeteria indicada esta inactiva.");
+  }
+
+  try {
+    const passwordHash = await bcrypt.hash(password, 10);
+    return await new UsuarioModel({
+      nombre: nombreLimpio,
+      correo: correoLimpio,
+      passwordHash,
+      cafeteriaId
+    }).save();
+  } catch (error) {
+    if (error?.code === 11000) {
+      throw new GraphQLError(`Ya existe un usuario con el correo "${correoLimpio}".`, {
+        extensions: { code: "CORREO_DUPLICADO" }
+      });
+    }
+    throw error;
+  }
 }
 
 // Pipeline de agregacion: productos mas vendidos DENTRO de una cafeteria
@@ -336,6 +389,12 @@ export const resolvers = {
       return { token, expiraEn, usuario: mapUsuario(doc) };
     },
 
+    registro: async (_, datos) => {
+      const doc = await crearUsuario(datos);
+      const { token, expiraEn } = await iniciarSesion(doc._id);
+      return { token, expiraEn, usuario: mapUsuario(doc) };
+    },
+
     logout: async (_, __, contexto) => {
       const { jti } = requerirSesion(contexto);
       return cerrarSesion(jti);
@@ -378,23 +437,7 @@ export const resolvers = {
       }
     },
 
-    registrarUsuario: async (_, { nombre, correo, password, cafeteriaId }) => {
-      const cafeteria = await CafeteriaModel.findById(cafeteriaId);
-      if (!cafeteria) {
-        throw new Error("La cafeteria indicada no existe.");
-      }
-      if (password.length < 6) {
-        throw new Error("La contrasena debe tener al menos 6 caracteres.");
-      }
-
-      try {
-        const passwordHash = await bcrypt.hash(password, 10);
-        const doc = await new UsuarioModel({ nombre, correo, passwordHash, cafeteriaId }).save();
-        return mapUsuario(doc);
-      } catch (error) {
-        return manejarDuplicado(error, `Ya existe un usuario con el correo "${correo}".`);
-      }
-    },
+    registrarUsuario: async (_, datos) => mapUsuario(await crearUsuario(datos)),
 
     // ---- Productos e inventario ----
     registrarProducto: async (_, {
