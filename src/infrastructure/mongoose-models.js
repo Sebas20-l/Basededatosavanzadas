@@ -196,6 +196,14 @@ const ProductoSchema = new mongoose.Schema({
   destacado: { type: Boolean, default: false },
   // Etiqueta corta opcional (ej. "Nuevo", "Mas vendido")
   etiqueta: { type: String, default: "", trim: true },
+  // Minutos que tarda en prepararse una orden; sirve para calcular la hora de recogida
+  tiempoPreparacionMin: {
+    type: Number,
+    default: 5,
+    min: [1, "El tiempo de preparacion debe ser de al menos 1 minuto."],
+    max: [120, "El tiempo de preparacion no puede pasar de 120 minutos."],
+    validate: esEntero
+  },
   cafeteriaId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: "Cafeteria",

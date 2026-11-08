@@ -302,6 +302,13 @@ const productosMenu = [
   prod("Extras", "Bebida de avena", 15),
   prod("Extras", "Queso extra", 15)
 ];
+// Minutos aproximados que tarda cada tipo de platillo (para la hora de recogida)
+const TIEMPO_PREPARACION = {
+  "Café": 3, "Bebidas": 1, "Licuados": 4, "Desayunos de huevos": 10, "Burritos": 6,
+  "Tacos": 8, "Molletes": 7, "Guisados": 5, "Chilaquiles": 10, "Sándwiches": 5,
+  "Ensaladas": 6, "Combos": 8, "Extras": 1
+};
+
 for (const p of productosMenu) {
   await ProductoModel.updateOne(
     { cafeteriaId: cafeteria._id, nombre: p.nombre },
@@ -317,7 +324,8 @@ for (const p of productosMenu) {
         categoria: p.categoria,
         imagenUrl: p.imagenUrl,
         destacado: p.destacado,
-        etiqueta: p.etiqueta
+        etiqueta: p.etiqueta,
+        tiempoPreparacionMin: TIEMPO_PREPARACION[p.categoria] ?? 5
       }
     },
     { upsert: true }

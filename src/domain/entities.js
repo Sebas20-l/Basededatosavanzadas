@@ -93,12 +93,32 @@ export class Inventario {
 // -------------------------------------------------
 // `precio` es { monto, moneda } donde moneda es el codigo del catalogo (MXN, JPY...).
 export class Producto {
-  constructor(id, nombre, precio, disponible, inventario) {
+  constructor(id, nombre, precio, disponible, inventario, tiempoPreparacionMin = 5) {
     this.id = id;
     this.nombre = nombre;
     this.precio = precio;
     this.disponible = disponible;
     this.inventario = inventario;
+    this.tiempoPreparacionMin = tiempoPreparacionMin;
+  }
+
+  validarNombre() {
+    if (!String(this.nombre ?? "").trim()) {
+      throw new Error("El producto necesita un nombre.");
+    }
+  }
+
+  // Regla de negocio: el tiempo de preparacion es un entero entre 1 y 120 minutos.
+  validarTiempoPreparacion() {
+    const minutos = this.tiempoPreparacionMin;
+    if (!Number.isInteger(minutos) || minutos < 1 || minutos > 120) {
+      throw new Error(`El tiempo de preparacion de "${this.nombre}" debe ser de 1 a 120 minutos.`);
+    }
+  }
+
+  // Un producto se muestra como agotado si el vendedor lo pauso o ya no hay stock.
+  estaAgotado() {
+    return !this.disponible || this.inventario.stock <= 0;
   }
 
   validarPrecioPositivo() {

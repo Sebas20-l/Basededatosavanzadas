@@ -112,7 +112,18 @@ type Producto {
   imagenUrl: String
   destacado: Boolean!
   etiqueta: String!
+  # Minutos que tarda una orden; se usa para calcular la hora de recogida
+  tiempoPreparacionMin: Int!
+  # true si el vendedor lo pauso o ya no hay stock
+  agotado: Boolean!
   cafeteriaId: ID!
+  cafeteria: Cafeteria
+}
+
+# Una seccion del menu (ej. "Burritos") con sus productos; destacados primero
+type CategoriaMenu {
+  categoria: String!
+  productos: [Producto!]!
 }
 
 type ItemPedido {
@@ -194,6 +205,20 @@ input InventarioInput {
   cantidadReposicion: Int!
 }
 
+# Campos que el vendedor puede cambiar de un platillo; los que no se envian no cambian
+input ProductoCambiosInput {
+  nombre: String
+  precio: DineroInput
+  descripcion: String
+  categoria: String
+  # URL https de Cloudinary
+  imagenUrl: String
+  destacado: Boolean
+  etiqueta: String
+  disponible: Boolean
+  tiempoPreparacionMin: Int
+}
+
 input ItemPedidoInput {
   productoId: ID!
   cantidad: Int!
@@ -227,6 +252,10 @@ type Query {
   miNegocio: Negocio
 
   productosPorCafeteria(cafeteriaId: ID!): [Producto!]!
+  # El mismo menu agrupado por categoria
+  menuPorCategoria(cafeteriaId: ID!): [CategoriaMenu!]!
+  # Otras cafeterias del mismo negocio y escuela donde si hay ese producto
+  dondeHay(productoId: ID!): [Producto!]!
   producto(id: ID!): Producto
   # Productos cuyo stock ya llego al punto de reorden
   productosPorReponer(cafeteriaId: ID!): [Producto!]!
@@ -285,7 +314,12 @@ type Mutation {
     imagenUrl: String
     destacado: Boolean
     etiqueta: String
+    tiempoPreparacionMin: Int
   ): Producto!
+  # VENDEDOR o JEFE de la cafeteria: edita un platillo
+  actualizarProducto(productoId: ID!, cambios: ProductoCambiosInput!): Producto!
+  # VENDEDOR o JEFE: marca un platillo como agotado o disponible
+  cambiarDisponibilidadProducto(productoId: ID!, disponible: Boolean!): Producto!
 
   # Suma stock. Si no se indica cantidad, usa la cantidadReposicion del producto.
   reponerInventario(productoId: ID!, cantidad: Int): Producto!
