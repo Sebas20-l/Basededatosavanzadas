@@ -1,6 +1,11 @@
 import mongoose from "mongoose";
 import bcrypt from "bcryptjs";
 import { GraphQLError } from "graphql";
+import { readFileSync } from "fs";
+import { fileURLToPath } from "url";
+import path from "path";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 import {
   MonedaModel,
   EstadoPedidoModel,
@@ -93,6 +98,11 @@ function mapProducto(doc) {
     precio: mapDinero(doc.precio),
     disponible: doc.disponible,
     inventario: mapInventario(doc.inventario),
+    descripcion: doc.descripcion ?? "",
+    categoria: doc.categoria || "Menu",
+    imagenUrl: doc.imagenUrl || null,
+    destacado: doc.destacado ?? false,
+    etiqueta: doc.etiqueta ?? "",
     cafeteriaId: doc.cafeteriaId
   };
 }
@@ -162,6 +172,58 @@ function manejarDuplicado(error, mensaje) {
   throw error;
 }
 
+// Error de validacion que la app puede mostrar tal cual.
+function datoInvalido(mensaje) {
+  return new GraphQLError(mensaje, { extensions: { code: "BAD_USER_INPUT" } });
+}
+
+const FORMATO_CORREO = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const PASSWORD_MIN = 6;
+
+// Valida los datos y crea el usuario. La usan registrarUsuario y registro.
+async function crearUsuario({ nombre, correo, password, cafeteriaId }) {
+  const nombreLimpio = String(nombre).trim();
+  const correoLimpio = String(correo).trim().toLowerCase();
+
+  if (!nombreLimpio) {
+    throw datoInvalido("El nombre es obligatorio.");
+  }
+  if (correoLimpio.length > 254 || !FORMATO_CORREO.test(correoLimpio)) {
+    throw datoInvalido("El correo no tiene un formato valido.");
+  }
+  if (password.length < PASSWORD_MIN) {
+    throw datoInvalido(`La contrasena debe tener al menos ${PASSWORD_MIN} caracteres.`);
+  }
+  if (!mongoose.isValidObjectId(cafeteriaId)) {
+    throw datoInvalido("La cafeteria indicada no existe.");
+  }
+
+  const cafeteria = await CafeteriaModel.findById(cafeteriaId);
+  if (!cafeteria) {
+    throw datoInvalido("La cafeteria indicada no existe.");
+  }
+  if (!cafeteria.activa) {
+    throw datoInvalido("La cafeteria indicada esta inactiva.");
+  }
+
+  try {
+    const passwordHash = await bcrypt.hash(password, 10);
+    return await new UsuarioModel({
+      nombre: nombreLimpio,
+      correo: correoLimpio,
+      passwordHash,
+      cafeteriaId
+    }).save();
+  } catch (error) {
+    if (error?.code === 11000) {
+      throw new GraphQLError(`Ya existe un usuario con el correo "${correoLimpio}".`, {
+        extensions: { code: "CORREO_DUPLICADO" }
+      });
+    }
+    throw error;
+  }
+}
+
 // Pipeline de agregacion: productos mas vendidos DENTRO de una cafeteria
 // especifica. El $match filtra desde el inicio para no mezclar datos
 // de distintas escuelas/cafeterias entre si (multi-tenant).
@@ -226,6 +288,8 @@ export const resolvers = {
 
   Query: {
     // ---- Sesion ----
+        terminos: () =>
+      readFileSync(path.join(__dirname, "../contenido/terminos.md"), "utf8"),
     me: async (_, __, contexto) => {
       const { usuarioId } = requerirSesion(contexto);
       const doc = await UsuarioModel.findById(usuarioId);
@@ -340,6 +404,12 @@ export const resolvers = {
       return { token, expiraEn, usuario: mapUsuario(doc) };
     },
 
+    registro: async (_, datos) => {
+      const doc = await crearUsuario(datos);
+      const { token, expiraEn } = await iniciarSesion(doc._id);
+      return { token, expiraEn, usuario: mapUsuario(doc) };
+    },
+
     logout: async (_, __, contexto) => {
       const { jti } = requerirSesion(contexto);
       return cerrarSesion(jti);
@@ -382,53 +452,13 @@ export const resolvers = {
       }
     },
 
-    registrarUsuario: async (_, { nombre, correo, password, cafeteriaId }) => {
-      // Canonicalizar el correo antes de validar y guardar evita cuentas duplicadas por mayusculas.
-      const nombreNormalizado = nombre.trim();
-      const correoNormalizado = correo.trim().toLowerCase();
-
-      if (!nombreNormalizado) {
-        throw entradaInvalida("El nombre no puede estar vacio.");
-      }
-      if (
-        correoNormalizado.length > 254 ||
-        !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(correoNormalizado)
-      ) {
-        throw entradaInvalida("Debes proporcionar un correo electronico valido.");
-      }
-      // Mantener la regla minima antes de generar el hash bcrypt.
-      if (password.length < 6) {
-        throw entradaInvalida("La contrasena debe tener al menos 6 caracteres.");
-      }
-      if (!mongoose.isValidObjectId(cafeteriaId)) {
-        throw entradaInvalida("El identificador de cafeteria no es valido.");
-      }
-
-      const cafeteria = await CafeteriaModel.findById(cafeteriaId);
-      if (!cafeteria) {
-        throw entradaInvalida("La cafeteria indicada no existe.");
-      }
-      if (!cafeteria.activa) {
-        throw entradaInvalida("La cafeteria indicada esta inactiva.");
-      }
-
-      try {
-        // Nunca persistir la contrasena en texto claro.
-        const passwordHash = await bcrypt.hash(password, 10);
-        const doc = await new UsuarioModel({
-          nombre: nombreNormalizado,
-          correo: correoNormalizado,
-          passwordHash,
-          cafeteriaId
-        }).save();
-        return mapUsuario(doc);
-      } catch (error) {
-        return manejarDuplicado(error, `Ya existe un usuario con el correo "${correoNormalizado}".`);
-      }
-    },
+    registrarUsuario: async (_, datos) => mapUsuario(await crearUsuario(datos)),
 
     // ---- Productos e inventario ----
-    registrarProducto: async (_, { nombre, precio, disponible, inventario, cafeteriaId }) => {
+    registrarProducto: async (_, {
+      nombre, precio, disponible, inventario, cafeteriaId,
+      descripcion, categoria, imagenUrl, destacado, etiqueta
+    }) => {
       const cafeteria = await CafeteriaModel.findById(cafeteriaId);
       if (!cafeteria) {
         throw new Error("La cafeteria indicada no existe.");
@@ -458,6 +488,11 @@ export const resolvers = {
           puntoReorden: inventario.puntoReorden,
           cantidadReposicion: inventario.cantidadReposicion
         },
+        descripcion,
+        categoria,
+        imagenUrl,
+        destacado,
+        etiqueta,
         cafeteriaId
       }).save();
 

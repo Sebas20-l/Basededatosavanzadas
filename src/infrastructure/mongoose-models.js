@@ -133,6 +133,23 @@ const ProductoSchema = new mongoose.Schema({
   precio: { type: DineroSchema, required: [true, "Debes definir un precio."] },
   disponible: { type: Boolean, default: true },
   inventario: { type: InventarioSchema, required: [true, "El producto necesita inventario."] },
+  // ---- Datos para mostrar el menu en la app ----
+  descripcion: { type: String, default: "", trim: true },
+  // La app agrupa el menu por categoria (ej. "Bebidas", "Alimentos", "Combos", "Extras")
+  categoria: { type: String, default: "Menu", trim: true },
+  // URL completa de la imagen en Cloudinary (las imagenes viven alla, aqui solo su direccion)
+  imagenUrl: {
+    type: String,
+    default: "",
+    trim: true,
+    validate: {
+      validator: v => !v || /^https:\/\//.test(v),
+      message: "La imagen debe ser una URL https."
+    }
+  },
+  destacado: { type: Boolean, default: false },
+  // Etiqueta corta opcional (ej. "Nuevo", "Mas vendido")
+  etiqueta: { type: String, default: "", trim: true },
   cafeteriaId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: "Cafeteria",
