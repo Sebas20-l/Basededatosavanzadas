@@ -61,6 +61,7 @@ import {
   crearCuenta
 } from "./comun.js";
 import { resolversMultiempresa } from "./multiempresa.js";
+import { resolversReportes } from "./reportes.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -406,8 +407,11 @@ export const resolvers = {
     }
   },
 
+  ResumenCafeteria: resolversReportes.ResumenCafeteria,
+
   Query: {
     ...resolversMultiempresa.Query,
+    ...resolversReportes.Query,
 
     // ---- Sesion ----
     terminos: () =>
