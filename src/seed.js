@@ -37,8 +37,11 @@ const monedas = [
   { codigo: "JPY", nombre: "Yen japones", simbolo: "¥", decimales: 0, activa: true }
 ];
 
-// Cada estado dice a cuales puede pasar. Agregar un estado nuevo (ej. CANCELADO)
-// es agregar una fila aqui, sin tocar el codigo de los resolvers.
+// Cada estado dice a cuales puede pasar. Agregar un estado nuevo es agregar
+// una fila aqui, sin tocar el codigo de los resolvers.
+//
+//   PENDIENTE -> ACEPTADO -> EN_PREPARACION -> LISTO -> ENTREGADO
+//        \-----------\-> CANCELADO
 const estadosPedido = [
   {
     clave: "PENDIENTE",
@@ -46,12 +49,20 @@ const estadosPedido = [
     orden: 1,
     esInicial: true,
     esFinal: false,
-    transiciones: ["EN_PREPARACION"]
+    transiciones: ["ACEPTADO", "CANCELADO"]
+  },
+  {
+    clave: "ACEPTADO",
+    nombre: "Aceptado",
+    orden: 2,
+    esInicial: false,
+    esFinal: false,
+    transiciones: ["EN_PREPARACION", "CANCELADO"]
   },
   {
     clave: "EN_PREPARACION",
     nombre: "En preparacion",
-    orden: 2,
+    orden: 3,
     esInicial: false,
     esFinal: false,
     transiciones: ["LISTO"]
@@ -59,7 +70,7 @@ const estadosPedido = [
   {
     clave: "LISTO",
     nombre: "Listo para recoger",
-    orden: 3,
+    orden: 4,
     esInicial: false,
     esFinal: false,
     transiciones: ["ENTREGADO"]
@@ -67,7 +78,15 @@ const estadosPedido = [
   {
     clave: "ENTREGADO",
     nombre: "Entregado",
-    orden: 4,
+    orden: 5,
+    esInicial: false,
+    esFinal: true,
+    transiciones: []
+  },
+  {
+    clave: "CANCELADO",
+    nombre: "Cancelado",
+    orden: 6,
     esInicial: false,
     esFinal: true,
     transiciones: []

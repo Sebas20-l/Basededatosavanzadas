@@ -220,12 +220,33 @@ const ItemPedidoSchema = new mongoose.Schema({
   cantidad: { type: Number, required: true, min: 1, validate: esEntero }
 }, { _id: false });
 
+// Cada cambio de estado queda registrado: quien lo hizo y cuando
+const CambioEstadoSchema = new mongoose.Schema({
+  estado: { type: String, required: true },
+  fecha: { type: Date, required: true, default: Date.now },
+  usuarioId: { type: mongoose.Schema.Types.ObjectId, ref: "Usuario" }
+}, { _id: false });
+
 const PedidoSchema = new mongoose.Schema({
   usuarioId: { type: mongoose.Schema.Types.ObjectId, ref: "Usuario", required: true },
   cafeteriaId: { type: mongoose.Schema.Types.ObjectId, ref: "Cafeteria", required: true },
+  // Copias de la cafeteria para que los reportes por escuela o negocio no
+  // tengan que hacer $lookup
+  escuelaId: { type: mongoose.Schema.Types.ObjectId, ref: "Escuela" },
+  negocioId: { type: mongoose.Schema.Types.ObjectId, ref: "Negocio" },
   items: [ItemPedidoSchema],
   total: { type: DineroSchema, required: true },
-  estado: { type: String, required: true, uppercase: true, trim: true }
+  estado: { type: String, required: true, uppercase: true, trim: true },
+  historial: [CambioEstadoSchema],
+  // ---- Pickup ----
+  tiempoEstimadoMin: { type: Number, min: 0 },
+  horaRecogida: { type: Date },
+  // Codigo que el comprador muestra al recoger (solo el lo ve)
+  codigoRecogida: { type: String },
+  notas: { type: String, trim: true, default: "", maxlength: [200, "Las notas no pueden pasar de 200 caracteres."] }
 }, { timestamps: true });
+
+PedidoSchema.index({ cafeteriaId: 1, estado: 1, horaRecogida: 1 });
+PedidoSchema.index({ usuarioId: 1, createdAt: -1 });
 
 export const PedidoModel = mongoose.model("Pedido", PedidoSchema);

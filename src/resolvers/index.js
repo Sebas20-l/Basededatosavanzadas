@@ -1,5 +1,6 @@
 import mongoose from "mongoose";
 import bcrypt from "bcryptjs";
+import { randomInt } from "node:crypto";
 import { readFileSync } from "fs";
 import { fileURLToPath } from "url";
 import path from "path";
@@ -18,8 +19,18 @@ import {
   Inventario,
   Producto,
   ItemPedido,
-  Pedido
+  Pedido,
+  calcularTiempoEstimado,
+  validarHoraRecogida
 } from "../domain/entities.js";
+import {
+  agregarACola,
+  quitarDeCola,
+  estadoCola,
+  posicionEnCola,
+  CAPACIDAD_PARALELA
+} from "../infrastructure/cola.js";
+import { notificar, leerNotificaciones } from "../infrastructure/notificaciones.js";
 import { obtenerConCache, invalidarCache, clavesCache } from "../infrastructure/cache.js";
 import {
   iniciarSesion,
@@ -33,6 +44,7 @@ import { sincronizarUsuario, sincronizarSinFallar } from "../infrastructure/graf
 import { ROLES } from "../domain/roles.js";
 import {
   datoInvalido,
+  enTransaccion,
   manejarDuplicado,
   normalizarClave,
   validarId,
@@ -138,8 +150,110 @@ function mapPedido(doc) {
       cantidad: item.cantidad
     })),
     total: mapDinero(doc.total),
-    estado: doc.estado
+    estado: doc.estado,
+    notas: doc.notas ?? "",
+    tiempoEstimadoMin: doc.tiempoEstimadoMin ?? null,
+    horaRecogida: doc.horaRecogida ? doc.horaRecogida.toISOString() : null,
+    // Pedido.codigoRecogida decide si se muestra (solo al dueno del pedido)
+    codigoRecogida: doc.codigoRecogida ?? null,
+    historial: (doc.historial ?? []).map(cambio => ({
+      estado: cambio.estado,
+      fecha: cambio.fecha.toISOString(),
+      usuarioId: cambio.usuarioId ?? null
+    })),
+    creadoEn: doc.createdAt ? doc.createdAt.toISOString() : null
   };
+}
+
+// -------------------------------------------------
+// Pickup
+// -------------------------------------------------
+const ZONA_HORARIA = process.env.ZONA_HORARIA || "America/Chihuahua";
+// Estados en los que la cocina ya no trabaja en el pedido (sale de la cola)
+const ESTADOS_FUERA_DE_COLA = ["LISTO", "ENTREGADO", "CANCELADO"];
+
+const horaLegible = fecha =>
+  fecha.toLocaleTimeString("es-MX", { hour: "2-digit", minute: "2-digit", timeZone: ZONA_HORARIA });
+
+function mensajeDeEstado(pedido) {
+  switch (pedido.estado) {
+    case "ACEPTADO":
+      return pedido.horaRecogida
+        ? `La cafeteria acepto tu pedido. Recogelo a las ${horaLegible(pedido.horaRecogida)}.`
+        : "La cafeteria acepto tu pedido.";
+    case "EN_PREPARACION":
+      return "Tu pedido se esta preparando.";
+    case "LISTO":
+      return pedido.codigoRecogida
+        ? `¡Tu pedido esta listo! Muestra el codigo ${pedido.codigoRecogida} al recogerlo.`
+        : "¡Tu pedido esta listo para recoger!";
+    case "ENTREGADO":
+      return "Pedido entregado. ¡Buen provecho!";
+    case "CANCELADO":
+      return "Tu pedido fue cancelado y no se te cobrara.";
+    default:
+      return `Tu pedido cambio a ${pedido.estado}.`;
+  }
+}
+
+// Regresa al inventario lo que el pedido habia descontado
+async function devolverStock(pedido, session) {
+  for (const item of pedido.items) {
+    await ProductoModel.updateOne(
+      { _id: item.productoId },
+      { $inc: { "inventario.stock": item.cantidad } },
+      { session }
+    );
+  }
+}
+
+// Valida y aplica un cambio de estado; si es CANCELADO devuelve el stock en
+// la misma transaccion. Despues saca el pedido de la cola y avisa al comprador.
+async function cambiarEstado(pedido, claveNueva, usuarioId) {
+  const estadoActual = await obtenerEstadoDominio(pedido.estado);
+  const estadoNuevo = await obtenerEstadoDominio(claveNueva);
+  estadoActual.validarTransicion(estadoNuevo.clave);
+
+  pedido.estado = estadoNuevo.clave;
+  pedido.historial.push({ estado: estadoNuevo.clave, fecha: new Date(), usuarioId });
+
+  let guardado;
+  if (estadoNuevo.clave === "CANCELADO") {
+    guardado = await enTransaccion(async session => {
+      await devolverStock(pedido, session);
+      return pedido.save({ session });
+    });
+    await invalidarProductos(pedido.cafeteriaId, pedido.items.map(i => String(i.productoId)));
+  } else {
+    guardado = await pedido.save();
+  }
+
+  if (ESTADOS_FUERA_DE_COLA.includes(guardado.estado)) {
+    await quitarDeCola(guardado.cafeteriaId, guardado._id);
+  }
+  await notificar(guardado.usuarioId, {
+    pedidoId: guardado._id,
+    estado: guardado.estado,
+    mensaje: mensajeDeEstado(guardado)
+  });
+  // El reporte de mas vendidos cuenta pedidos ENTREGADO: puede cambiar
+  await invalidarCache(clavesCache.productosMasVendidos(guardado.cafeteriaId));
+  return guardado;
+}
+
+// Productos (con su tiempo de preparacion) de una lista de items de ESTA cafeteria
+async function tiemposDeItems(cafeteriaId, items) {
+  const ids = items.map(item => item.productoId);
+  ids.forEach(id => validarId(id, "producto"));
+  const productos = await ProductoModel.find({ _id: { $in: ids }, cafeteriaId })
+    .select("tiempoPreparacionMin");
+  const tiempos = new Map(productos.map(p => [String(p._id), p.tiempoPreparacionMin ?? 5]));
+  return items.map(item => {
+    if (!tiempos.has(String(item.productoId))) {
+      throw datoInvalido(`El producto ${item.productoId} no es de esta cafeteria.`);
+    }
+    return { tiempoPreparacionMin: tiempos.get(String(item.productoId)), cantidad: item.cantidad };
+  });
 }
 
 // -------------------------------------------------
@@ -237,6 +351,15 @@ export const resolvers = {
   Escuela: resolversMultiempresa.Escuela,
   Negocio: resolversMultiempresa.Negocio,
   Usuario: resolversMultiempresa.Usuario,
+
+  Pedido: {
+    // El codigo solo lo ve quien hizo el pedido; el vendedor se lo pide al recoger
+    codigoRecogida: (pedido, _, contexto) =>
+      contexto.auth && String(contexto.auth.usuarioId) === String(pedido.usuarioId)
+        ? pedido.codigoRecogida
+        : null,
+    posicionEnCola: pedido => posicionEnCola(pedido.cafeteriaId, pedido.id)
+  },
 
   // Cada producto puede mostrar su cafeteria (util en dondeHay)
   Producto: {
@@ -413,6 +536,38 @@ export const resolvers = {
       }
       const docs = await PedidoModel.find({ usuarioId }).sort({ createdAt: -1 });
       return docs.map(mapPedido);
+    },
+
+    // Pantalla del vendedor: pedidos activos ordenados por hora de recogida
+    colaCafeteria: async (_, { cafeteriaId }, contexto) => {
+      validarId(cafeteriaId, "cafeteria");
+      await autorizar(contexto, "PEDIDO_LEER_CAFETERIA", { cafeteriaId });
+      const docs = await PedidoModel.find({
+        cafeteriaId,
+        estado: { $in: ["PENDIENTE", "ACEPTADO", "EN_PREPARACION", "LISTO"] }
+      }).sort({ horaRecogida: 1, createdAt: 1 });
+      return docs.map(mapPedido);
+    },
+
+    // Antes de pedir: "si pides ahora, recoges a las 10:25"
+    estimarRecogida: async (_, { cafeteriaId, items }) => {
+      validarId(cafeteriaId, "cafeteria");
+      if (!items.length) {
+        throw datoInvalido("Agrega al menos un producto para estimar el tiempo.");
+      }
+      const tiempos = await tiemposDeItems(cafeteriaId, items);
+      const cola = await estadoCola(cafeteriaId);
+      const { totalMin } = calcularTiempoEstimado(tiempos, cola.minutos, CAPACIDAD_PARALELA);
+      return {
+        tiempoEstimadoMin: totalMin,
+        horaRecogida: new Date(Date.now() + totalMin * 60 * 1000).toISOString(),
+        pedidosEnCola: cola.pedidos
+      };
+    },
+
+    misNotificaciones: async (_, { limite }, contexto) => {
+      const { usuarioId } = requerirSesion(contexto);
+      return leerNotificaciones(usuarioId, Math.min(Math.max(limite ?? 20, 1), 50));
     },
 
     pedidosPorCafeteria: async (_, { cafeteriaId }, contexto) => {
@@ -632,7 +787,7 @@ export const resolvers = {
     // ---- Pedidos ----
     // El pedido siempre es del usuario de la sesion. Regla multi-tenant: solo
     // se puede pedir en cafeterias de la escuela a la que pertenece el usuario.
-    crearPedido: async (_, { usuarioId: usuarioIdEnviado, cafeteriaId, items }, contexto) => {
+    crearPedido: async (_, { usuarioId: usuarioIdEnviado, cafeteriaId, items, horaRecogida, notas }, contexto) => {
       validarId(cafeteriaId, "cafeteria");
       const { usuarioId } = await autorizar(contexto, "PEDIDO_CREAR", { cafeteriaId });
       if (usuarioIdEnviado && String(usuarioIdEnviado) !== String(usuarioId)) {
@@ -659,15 +814,20 @@ export const resolvers = {
         cantidades.set(clave, (cantidades.get(clave) ?? 0) + cantidad);
       }
 
+      // Cuanto trabajo tiene ya la cocina (cola en Redis)
+      const cola = await estadoCola(cafeteriaId);
+
       // Crear el pedido y descontar el stock es UNA sola operacion: si algo
       // falla (sin stock, monedas mezcladas...), la transaccion se revierte y
       // el inventario queda como estaba. Requiere replica set (Atlas lo es).
       const session = await mongoose.startSession();
       let pedidoGuardado;
+      let estimacion;
 
       try {
         await session.withTransaction(async () => {
           const itemsPedido = [];
+          const tiemposItems = [];
 
           for (const [productoId, cantidad] of cantidades) {
             const producto = await ProductoModel.findById(productoId).session(session);
@@ -703,6 +863,7 @@ export const resolvers = {
             );
             item.validarCantidad();
             itemsPedido.push(item);
+            tiemposItems.push({ tiempoPreparacionMin: producto.tiempoPreparacionMin ?? 5, cantidad });
           }
 
           // Reglas de dominio: el pedido no puede ir vacio, se cobra en una sola
@@ -711,6 +872,20 @@ export const resolvers = {
           pedidoDominio.validarTieneItems();
           const moneda = await obtenerMonedaDominio(pedidoDominio.validarUnaSolaMoneda());
           const total = pedidoDominio.calcularTotal(moneda);
+
+          // Pickup: cuanto tarda y a que hora se recoge
+          estimacion = calcularTiempoEstimado(tiemposItems, cola.minutos, CAPACIDAD_PARALELA);
+          const ahora = new Date();
+          const masTemprana = new Date(ahora.getTime() + estimacion.totalMin * 60 * 1000);
+          let recogida = masTemprana;
+          if (horaRecogida) {
+            recogida = new Date(horaRecogida);
+            try {
+              validarHoraRecogida(recogida, masTemprana, ahora);
+            } catch (error) {
+              throw datoInvalido(error.message);
+            }
+          }
 
           const [doc] = await PedidoModel.create(
             [
@@ -724,7 +899,14 @@ export const resolvers = {
                   cantidad: i.cantidad
                 })),
                 total,
-                estado: estadoInicial.clave
+                estado: estadoInicial.clave,
+                escuelaId: cafeteria.escuelaId,
+                negocioId: cafeteria.negocioId,
+                historial: [{ estado: estadoInicial.clave, fecha: ahora, usuarioId }],
+                tiempoEstimadoMin: Math.round((recogida - ahora) / 60000),
+                horaRecogida: recogida,
+                codigoRecogida: String(randomInt(0, 10000)).padStart(4, "0"),
+                notas: notas ?? ""
               }
             ],
             { session }
@@ -744,28 +926,47 @@ export const resolvers = {
 
       // El pedido desconto stock: lo cacheado de esos productos ya no es valido
       await invalidarProductos(cafeteriaId, [...cantidades.keys()]);
+      // Entra a la cola de cocina con los minutos que le toma prepararse
+      await agregarACola(cafeteriaId, pedidoGuardado._id, estimacion.preparacionMin);
       return mapPedido(pedidoGuardado);
     },
 
-    actualizarEstadoPedido: async (_, { pedidoId, nuevoEstado }, contexto) => {
+    // El comprador cancela su pedido mientras la cafeteria aun no lo acepta
+    cancelarPedido: async (_, { pedidoId }, contexto) => {
+      validarId(pedidoId, "pedido");
+      const pedido = await PedidoModel.findById(pedidoId);
+      if (!pedido) {
+        throw datoInvalido("El pedido no existe.");
+      }
+      const { usuarioId } = await autorizar(contexto, "PEDIDO_CANCELAR_PROPIO", {
+        cafeteriaId: pedido.cafeteriaId
+      });
+      if (String(pedido.usuarioId) !== String(usuarioId)) {
+        throw prohibido("Solo puedes cancelar tus propios pedidos.");
+      }
+      if (pedido.estado !== "PENDIENTE") {
+        throw datoInvalido("Ya no puedes cancelarlo: la cafeteria ya acepto tu pedido.");
+      }
+      return mapPedido(await cambiarEstado(pedido, "CANCELADO", usuarioId));
+    },
+
+    // El vendedor avanza el pedido. Las transiciones validas salen del catalogo
+    // de estados. Para ENTREGADO hay que dar el codigo que muestra el comprador.
+    actualizarEstadoPedido: async (_, { pedidoId, nuevoEstado, codigoRecogida }, contexto) => {
       validarId(pedidoId, "pedido");
       const doc = await PedidoModel.findById(pedidoId);
       if (!doc) {
         throw new Error("El pedido no existe.");
       }
-      await autorizar(contexto, "PEDIDO_CAMBIAR_ESTADO", { cafeteriaId: doc.cafeteriaId });
+      const { usuarioId } = await autorizar(contexto, "PEDIDO_CAMBIAR_ESTADO", {
+        cafeteriaId: doc.cafeteriaId
+      });
 
-      // Ambos estados deben existir en el catalogo, y la transicion tambien
-      // se valida contra lo que dice el catalogo.
-      const estadoActual = await obtenerEstadoDominio(doc.estado);
-      const estadoNuevo = await obtenerEstadoDominio(nuevoEstado);
-      estadoActual.validarTransicion(estadoNuevo.clave);
-
-      doc.estado = estadoNuevo.clave;
-      const actualizado = await doc.save();
-      // El reporte de mas vendidos cuenta pedidos ENTREGADO: puede cambiar
-      await invalidarCache(clavesCache.productosMasVendidos(actualizado.cafeteriaId));
-      return mapPedido(actualizado);
+      const clave = normalizarClave(nuevoEstado);
+      if (clave === "ENTREGADO" && doc.codigoRecogida && codigoRecogida !== doc.codigoRecogida) {
+        throw datoInvalido("El codigo de recogida no coincide. Pideselo al comprador.");
+      }
+      return mapPedido(await cambiarEstado(doc, clave, usuarioId));
     }
   }
 };

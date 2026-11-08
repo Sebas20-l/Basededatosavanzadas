@@ -133,6 +133,14 @@ type ItemPedido {
   cantidad: Int!
 }
 
+type CambioEstado {
+  estado: String!
+  # Fecha ISO 8601
+  fecha: String!
+  # Quien hizo el cambio
+  usuarioId: ID
+}
+
 type Pedido {
   id: ID!
   usuarioId: ID!
@@ -141,6 +149,33 @@ type Pedido {
   total: Dinero!
   # Clave del catalogo de estados (ej. "PENDIENTE")
   estado: String!
+  notas: String!
+  # ---- Pickup ----
+  # Minutos desde que se hizo el pedido hasta la hora de recogida
+  tiempoEstimadoMin: Int
+  # Fecha ISO 8601
+  horaRecogida: String
+  # Solo lo ve el comprador; lo muestra al recoger
+  codigoRecogida: String
+  # 1 = el siguiente en la cocina; null si ya salio de la cola
+  posicionEnCola: Int
+  historial: [CambioEstado!]!
+  creadoEn: String
+}
+
+type EstimacionRecogida {
+  tiempoEstimadoMin: Int!
+  # Fecha ISO 8601
+  horaRecogida: String!
+  pedidosEnCola: Int!
+}
+
+type Notificacion {
+  pedidoId: ID!
+  estado: String!
+  mensaje: String!
+  # Fecha ISO 8601
+  fecha: String!
 }
 
 # Reporte generado por el pipeline de agregacion, siempre acotado a una cafeteria.
@@ -266,6 +301,12 @@ type Query {
   # Compatibilidad con la app: solo acepta el id del usuario de la sesion
   pedidosPorUsuario(usuarioId: ID!): [Pedido!]!
   pedidosPorCafeteria(cafeteriaId: ID!): [Pedido!]!
+  # VENDEDOR: pedidos activos de la cafeteria, por hora de recogida
+  colaCafeteria(cafeteriaId: ID!): [Pedido!]!
+  # Publica: tiempo y hora de recogida si se pide ahora
+  estimarRecogida(cafeteriaId: ID!, items: [ItemPedidoInput!]!): EstimacionRecogida!
+  # Avisos de cambios de estado de mis pedidos (mas recientes primero)
+  misNotificaciones(limite: Int = 20): [Notificacion!]!
 
   productosMasVendidos(cafeteriaId: ID!): [ProductoMasVendido!]!
 }
@@ -325,10 +366,16 @@ type Mutation {
   reponerInventario(productoId: ID!, cantidad: Int): Producto!
 
   # Protegida: el pedido es del usuario de la sesion. Descuenta el stock en una transaccion.
+  # horaRecogida (ISO 8601) es opcional: sin ella se usa la hora estimada mas pronta.
   crearPedido(
     cafeteriaId: ID!
     items: [ItemPedidoInput!]!
+    horaRecogida: String
+    notas: String
     usuarioId: ID @deprecated(reason: "El pedido siempre es del usuario de la sesion.")
   ): Pedido!
-  actualizarEstadoPedido(pedidoId: ID!, nuevoEstado: String!): Pedido!
+  # VENDEDOR o JEFE. Para pasar a ENTREGADO se pide el codigo de recogida del comprador.
+  actualizarEstadoPedido(pedidoId: ID!, nuevoEstado: String!, codigoRecogida: String): Pedido!
+  # Comprador: cancela su pedido mientras siga PENDIENTE; se regresa el stock
+  cancelarPedido(pedidoId: ID!): Pedido!
 }
