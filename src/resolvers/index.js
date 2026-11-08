@@ -31,6 +31,13 @@ import {
   CAPACIDAD_PARALELA
 } from "../infrastructure/cola.js";
 import { notificar, leerNotificaciones } from "../infrastructure/notificaciones.js";
+import {
+  registrarEvento,
+  eventosDePedido,
+  eventosDeCafeteria,
+  ventasPorHora,
+  diaYHora
+} from "../infrastructure/cassandra.js";
 import { obtenerConCache, invalidarCache, clavesCache } from "../infrastructure/cache.js";
 import {
   iniciarSesion,
@@ -231,6 +238,15 @@ async function cambiarEstado(pedido, claveNueva, usuarioId) {
   if (ESTADOS_FUERA_DE_COLA.includes(guardado.estado)) {
     await quitarDeCola(guardado.cafeteriaId, guardado._id);
   }
+  // Bitacora en Cassandra; al entregar se suma la venta a la hora actual
+  await registrarEvento({
+    pedido: guardado,
+    estado: guardado.estado,
+    usuarioId,
+    metricas: guardado.estado === "ENTREGADO"
+      ? { entregados: 1, ingresosCentavos: Math.round(guardado.total.monto * 100) }
+      : null
+  });
   await notificar(guardado.usuarioId, {
     pedidoId: guardado._id,
     estado: guardado.estado,
@@ -239,6 +255,15 @@ async function cambiarEstado(pedido, claveNueva, usuarioId) {
   // El reporte de mas vendidos cuenta pedidos ENTREGADO: puede cambiar
   await invalidarCache(clavesCache.productosMasVendidos(guardado.cafeteriaId));
   return guardado;
+}
+
+// "AAAA-MM-DD"; si no se manda, hoy en la zona horaria de la escuela
+function validarDia(dia) {
+  if (!dia) return diaYHora().dia;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dia) || Number.isNaN(new Date(dia).getTime())) {
+    throw datoInvalido("El dia debe tener formato AAAA-MM-DD.");
+  }
+  return dia;
 }
 
 // Productos (con su tiempo de preparacion) de una lista de items de ESTA cafeteria
@@ -563,6 +588,30 @@ export const resolvers = {
         horaRecogida: new Date(Date.now() + totalMin * 60 * 1000).toISOString(),
         pedidosEnCola: cola.pedidos
       };
+    },
+
+    // ---- Reportes desde Cassandra ----
+    // Bitacora completa de un pedido (quien y cuando cambio cada estado)
+    eventosPedido: async (_, { pedidoId }, contexto) => {
+      validarId(pedidoId, "pedido");
+      const pedido = await PedidoModel.findById(pedidoId);
+      if (!pedido) throw datoInvalido("El pedido no existe.");
+      await validarAccesoPedido(contexto, pedido);
+      return eventosDePedido(pedidoId);
+    },
+
+    // Todo lo que paso en una cafeteria en un dia (por defecto hoy)
+    actividadCafeteria: async (_, { cafeteriaId, dia, limite }, contexto) => {
+      validarId(cafeteriaId, "cafeteria");
+      await autorizar(contexto, "PEDIDO_LEER_CAFETERIA", { cafeteriaId });
+      return eventosDeCafeteria(cafeteriaId, validarDia(dia), Math.min(Math.max(limite ?? 100, 1), 500));
+    },
+
+    // Pedidos, piezas y ventas por hora de un dia: muestra las horas pico
+    horasPico: async (_, { cafeteriaId, dia }, contexto) => {
+      validarId(cafeteriaId, "cafeteria");
+      await autorizar(contexto, "REPORTE_VENTAS_LEER", { cafeteriaId });
+      return ventasPorHora(cafeteriaId, validarDia(dia));
     },
 
     misNotificaciones: async (_, { limite }, contexto) => {
@@ -928,6 +977,14 @@ export const resolvers = {
       await invalidarProductos(cafeteriaId, [...cantidades.keys()]);
       // Entra a la cola de cocina con los minutos que le toma prepararse
       await agregarACola(cafeteriaId, pedidoGuardado._id, estimacion.preparacionMin);
+      // Bitacora y demanda por hora en Cassandra
+      await registrarEvento({
+        pedido: pedidoGuardado,
+        estado: pedidoGuardado.estado,
+        usuarioId,
+        fecha: pedidoGuardado.createdAt,
+        metricas: { pedidos: 1, piezas: [...cantidades.values()].reduce((a, b) => a + b, 0) }
+      });
       return mapPedido(pedidoGuardado);
     },
 
