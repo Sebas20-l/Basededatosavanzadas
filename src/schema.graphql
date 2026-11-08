@@ -170,6 +170,28 @@ type EstimacionRecogida {
   pedidosEnCola: Int!
 }
 
+# Ventas de una cafeteria (pipeline de agregacion de MongoDB)
+type ResumenCafeteria {
+  cafeteriaId: ID!
+  nombreCafeteria: String!
+  cafeteria: Cafeteria
+  pedidos: Int!
+  entregados: Int!
+  cancelados: Int!
+  # Solo cuenta pedidos ENTREGADO
+  ingresos: Dinero!
+  ticketPromedio: Dinero!
+}
+
+# Promedios calculados con el historial de estados de los pedidos entregados
+type TiemposCafeteria {
+  pedidosMedidos: Int!
+  # De ACEPTADO a LISTO
+  promedioPreparacionMin: Float
+  # De que se hizo el pedido a que se entrego
+  promedioTotalMin: Float
+}
+
 # Un cambio de estado guardado en Cassandra
 type EventoPedido {
   pedidoId: ID!
@@ -326,6 +348,14 @@ type Query {
   colaCafeteria(cafeteriaId: ID!): [Pedido!]!
   # Publica: tiempo y hora de recogida si se pide ahora
   estimarRecogida(cafeteriaId: ID!, items: [ItemPedidoInput!]!): EstimacionRecogida!
+  # ---- Reportes desde MongoDB (agregaciones) ----
+  # JEFE: ventas de cada cafeteria de su negocio (sin negocioId usa el suyo)
+  resumenNegocio(negocioId: ID): [ResumenCafeteria!]!
+  # ADMIN_ESCUELA: ventas de cada cafeteria de la escuela
+  resumenEscuela(escuelaId: ID!): [ResumenCafeteria!]!
+  # JEFE: tiempo promedio de preparacion y de entrega
+  tiemposCafeteria(cafeteriaId: ID!): TiemposCafeteria!
+
   # ---- Reportes desde Cassandra (dia con formato AAAA-MM-DD; por defecto hoy) ----
   # Bitacora de un pedido: lo ve quien lo hizo o quien gestiona la cafeteria
   eventosPedido(pedidoId: ID!): [EventoPedido!]!

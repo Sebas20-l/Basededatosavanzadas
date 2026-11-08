@@ -94,7 +94,10 @@ const estadosPedido = [
 ];
 
 // Ajusta nombre, clave y ciudad a los reales de tu escuela.
-const escuelas = [{ clave: "ULSA", nombre: "ULSA", ciudad: "Chihuahua", activa: true }];
+const escuelas = [
+  { clave: "ULSA", nombre: "ULSA", ciudad: "Chihuahua", activa: true },
+  { clave: "TEC", nombre: "Tec de Monterrey", ciudad: "Monterrey", activa: true }
+];
 
 async function cargar(modelo, llave, datos) {
   const operaciones = datos.map(dato => ({
@@ -142,9 +145,10 @@ const passwordHash = await bcrypt.hash(DEMO_PASSWORD, 10);
 const LIGAS = ["escuelaId", "negocioId", "cafeteriaId"];
 
 // Crea o actualiza un usuario. Las ligas que no aplican a su rol se borran.
-async function usuarioDemo(correo, nombre, ligas) {
+// idReservado: para el JEFE, cuyo negocio ya apunta a ese id como dueno.
+async function usuarioDemo(correo, nombre, ligas, idReservado = null) {
   const existente = await UsuarioModel.findOne({ correo });
-  const _id = existente?._id ?? new mongoose.Types.ObjectId();
+  const _id = existente?._id ?? idReservado ?? new mongoose.Types.ObjectId();
   const $unset = Object.fromEntries(LIGAS.filter(l => !ligas[l]).map(l => [l, ""]));
   await UsuarioModel.updateOne(
     { correo },
@@ -178,14 +182,14 @@ const cafeteria = await CafeteriaModel.findOneAndUpdate(
 const usuariosDemo = [
   ["admin@cafeenlinea.mx", "Admin Plataforma", { rol: ROLES.ADMIN_PLATAFORMA }],
   ["admin@ulsa.mx", "Admin ULSA", { rol: ROLES.ADMIN_ESCUELA, escuelaId: escuelaDemo._id }],
-  [correoJefe, "Jefe Latosos", { rol: ROLES.JEFE, escuelaId: escuelaDemo._id, negocioId: negocio._id }],
+  [correoJefe, "Jefe Latosos", { rol: ROLES.JEFE, escuelaId: escuelaDemo._id, negocioId: negocio._id }, jefeId],
   ["vendedor@ulsa.mx", "Vendedor Latosos", {
     rol: ROLES.VENDEDOR, escuelaId: escuelaDemo._id, negocioId: negocio._id, cafeteriaId: cafeteria._id
   }],
   ["demo@ulsa.mx", "Usuario Demo", { rol: ROLES.CLIENTE, escuelaId: escuelaDemo._id }]
 ];
-for (const [correo, nombre, ligas] of usuariosDemo) {
-  await usuarioDemo(correo, nombre, ligas);
+for (const [correo, nombre, ligas, idReservado] of usuariosDemo) {
+  await usuarioDemo(correo, nombre, ligas, idReservado);
 }
 
 // Migracion: cafeterias sin negocio pasan al negocio demo (y su escuela tambien)
@@ -325,8 +329,34 @@ const productosMenu = [
 const TIEMPO_PREPARACION = {
   "Café": 3, "Bebidas": 1, "Licuados": 4, "Desayunos de huevos": 10, "Burritos": 6,
   "Tacos": 8, "Molletes": 7, "Guisados": 5, "Chilaquiles": 10, "Sándwiches": 5,
-  "Ensaladas": 6, "Combos": 8, "Extras": 1
+  "Ensaladas": 6, "Combos": 8, "Extras": 1, "Tortas": 7
 };
+
+// Crea los productos de una cafeteria. Precio y stock solo al crearlos; el
+// resto de los datos del menu se actualiza en cada seed.
+async function cargarMenu(cafeteriaDoc, lista) {
+  for (const p of lista) {
+    await ProductoModel.updateOne(
+      { cafeteriaId: cafeteriaDoc._id, nombre: p.nombre },
+      {
+        $setOnInsert: {
+          precio: { monto: p.monto, moneda: "MXN" },
+          disponible: true,
+          inventario: { stock: p.stock, puntoReorden: 5, cantidadReposicion: 20 }
+        },
+        $set: {
+          descripcion: p.descripcion,
+          categoria: p.categoria,
+          imagenUrl: p.imagenUrl,
+          destacado: p.destacado,
+          etiqueta: p.etiqueta,
+          tiempoPreparacionMin: TIEMPO_PREPARACION[p.categoria] ?? 5
+        }
+      },
+      { upsert: true }
+    );
+  }
+}
 
 for (const p of productosMenu) {
   await ProductoModel.updateOne(
@@ -351,10 +381,81 @@ for (const p of productosMenu) {
   );
 }
 
-console.log(`  Negocio demo: ${negocio.nombre} (id = ${negocio._id})`);
-console.log(`  Cafeteria demo: id = ${cafeteria._id}`);
+// ---------------------------------------------------------------------------
+// MAS DATOS DE DEMO MULTIEMPRESA
+//  - "Los Latosos del Chef" tiene 3 cafeterias en la ULSA y 1 en el TEC
+//    (un dueno, varias cafeterias, varias escuelas).
+//  - "Tortas Lupe" es otro negocio de la ULSA, con su propio JEFE.
+//  - En "Latosos Norte" los molletes estan agotados: sirve para probar dondeHay.
+// ---------------------------------------------------------------------------
+const escuelaTec = await EscuelaModel.findOne({ clave: "TEC" });
+await NegocioModel.updateOne({ _id: negocio._id }, { $addToSet: { escuelaIds: escuelaTec._id } });
+
+async function cafeteriaDemo(escuela, negocioDoc, nombre, ubicacion) {
+  return CafeteriaModel.findOneAndUpdate(
+    { escuelaId: escuela._id, nombre },
+    { $set: { negocioId: negocioDoc._id }, $setOnInsert: { activa: true, ubicacion } },
+    { upsert: true, new: true }
+  );
+}
+
+// Menu corto (nombre del menu real -> stock inicial) para las cafeterias extra
+const MENU_CORTO = {
+  "Americano": 40, "Latte": 30, "Burrito de asada": 25, "Molletes sencillos": 20,
+  "Chilaquiles con pollo": 15, "Agua natural 500 ml": 60, "Combo 1": 20
+};
+const menuCorto = stocks =>
+  productosMenu.filter(p => p.nombre in stocks).map(p => ({ ...p, stock: stocks[p.nombre] }));
+
+const latososNorte = await cafeteriaDemo(escuelaDemo, negocio, "Latosos Norte", "Edificio de Ingenieria");
+const latososBiblioteca = await cafeteriaDemo(escuelaDemo, negocio, "Latosos Biblioteca", "Junto a la biblioteca");
+const latososTec = await cafeteriaDemo(escuelaTec, negocio, "Latosos TEC", "Centro estudiantil");
+await cargarMenu(latososNorte, menuCorto({ ...MENU_CORTO, "Molletes sencillos": 0 }));
+await cargarMenu(latososBiblioteca, menuCorto(MENU_CORTO));
+await cargarMenu(latososTec, menuCorto(MENU_CORTO));
+
+// Segundo negocio: el JEFE y su negocio se apuntan entre si (id reservado)
+const correoLupe = "lupe@ulsa.mx";
+const lupeId = (await UsuarioModel.findOne({ correo: correoLupe }))?._id ?? new mongoose.Types.ObjectId();
+const tortasLupe = await NegocioModel.findOneAndUpdate(
+  { nombre: "Tortas Lupe" },
+  { $set: { duenoId: lupeId, activo: true }, $addToSet: { escuelaIds: escuelaDemo._id } },
+  { upsert: true, new: true }
+);
+const cafeteriaLupe = await cafeteriaDemo(escuelaDemo, tortasLupe, "Tortas Lupe", "Explanada principal");
+await cargarMenu(cafeteriaLupe, [
+  prod("Tortas", "Torta de jamon", 55, "Con aguacate, jitomate y chile."),
+  prod("Tortas", "Torta cubana", 85, "Pierna, jamon, salchicha y queso.", { destacado: true, etiqueta: "La favorita" }),
+  prod("Tortas", "Torta de milanesa", 75),
+  prod("Bebidas", "Agua de sabor 500 ml", 25)
+]);
+
+const usuariosExtra = [
+  ["admin@tec.mx", "Admin TEC", { rol: ROLES.ADMIN_ESCUELA, escuelaId: escuelaTec._id }],
+  ["vendedor.norte@ulsa.mx", "Vendedor Latosos Norte", {
+    rol: ROLES.VENDEDOR, escuelaId: escuelaDemo._id, negocioId: negocio._id, cafeteriaId: latososNorte._id
+  }],
+  ["vendedor.tec@tec.mx", "Vendedor Latosos TEC", {
+    rol: ROLES.VENDEDOR, escuelaId: escuelaTec._id, negocioId: negocio._id, cafeteriaId: latososTec._id
+  }],
+  [correoLupe, "Lupe (Tortas Lupe)", { rol: ROLES.JEFE, escuelaId: escuelaDemo._id, negocioId: tortasLupe._id }, lupeId],
+  ["vendedor.lupe@ulsa.mx", "Vendedor Tortas Lupe", {
+    rol: ROLES.VENDEDOR, escuelaId: escuelaDemo._id, negocioId: tortasLupe._id, cafeteriaId: cafeteriaLupe._id
+  }],
+  ["alumno@tec.mx", "Alumno TEC", { rol: ROLES.CLIENTE, escuelaId: escuelaTec._id }]
+];
+for (const [correo, nombre, ligas, idReservado] of usuariosExtra) {
+  await usuarioDemo(correo, nombre, ligas, idReservado);
+}
+
+const cafeteriasDemo = [cafeteria, latososNorte, latososBiblioteca, latososTec, cafeteriaLupe];
+
+console.log(`  Negocios demo: ${negocio.nombre} (id = ${negocio._id}), ${tortasLupe.nombre} (id = ${tortasLupe._id})`);
+for (const c of cafeteriasDemo) {
+  console.log(`  Cafeteria ${c.nombre}: id = ${c._id}`);
+}
 console.log(`  Usuarios demo (contrasena "${DEMO_PASSWORD}"):`);
-for (const [correo, , { rol }] of usuariosDemo) {
+for (const [correo, , { rol }] of [...usuariosDemo, ...usuariosExtra]) {
   console.log(`    ${rol.padEnd(16)} ${correo}`);
 }
 
@@ -363,8 +464,10 @@ await conectarRedis();
 await redisClient.del([
   clavesCache.monedas(),
   clavesCache.estadosPedido(),
-  clavesCache.productosPorCafeteria(cafeteria._id),
-  clavesCache.productosPorReponer(cafeteria._id)
+  ...cafeteriasDemo.flatMap(c => [
+    clavesCache.productosPorCafeteria(c._id),
+    clavesCache.productosPorReponer(c._id)
+  ])
 ]);
 // Copia la estructura multiempresa al grafo de permisos (Neo4j)
 await conectarNeo4j();
