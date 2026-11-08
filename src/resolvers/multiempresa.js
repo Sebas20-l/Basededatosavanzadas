@@ -16,6 +16,13 @@ import {
 } from "../infrastructure/mongoose-models.js";
 import { iniciarSesion, requerirSesion } from "../infrastructure/auth.js";
 import { autorizar } from "../infrastructure/autorizacion.js";
+import {
+  sincronizarEscuela,
+  sincronizarNegocio,
+  sincronizarCafeteria,
+  sincronizarUsuario,
+  sincronizarSinFallar
+} from "../infrastructure/grafo.js";
 import { ROLES } from "../domain/roles.js";
 import {
   datoInvalido,
@@ -149,6 +156,10 @@ export const resolversMultiempresa = {
       });
 
       const escuela = await EscuelaModel.findById(escuelaId);
+      await sincronizarSinFallar(`la escuela ${escuela.clave}`, async () => {
+        await sincronizarEscuela(escuela);
+        await sincronizarUsuario(usuarioAdmin);
+      });
       return {
         escuela: mapEscuela(escuela),
         codigoInvitacion: escuela.codigoInvitacion,
@@ -200,6 +211,10 @@ export const resolversMultiempresa = {
       });
 
       const negocio = await NegocioModel.findById(negocioId);
+      await sincronizarSinFallar(`el negocio ${negocio.nombre}`, async () => {
+        await sincronizarNegocio(negocio);
+        await sincronizarUsuario(usuarioJefe);
+      });
       return { negocio: mapNegocio(negocio), sesion: await sesionPayload(usuarioJefe) };
     },
 
@@ -218,6 +233,7 @@ export const resolversMultiempresa = {
         { $addToSet: { escuelaIds: escuela._id } },
         { new: true }
       );
+      await sincronizarSinFallar(`el negocio ${negocio.nombre}`, () => sincronizarNegocio(negocio));
       return mapNegocio(negocio);
     },
 
@@ -250,6 +266,7 @@ export const resolversMultiempresa = {
           escuelaId,
           negocioId: negocio._id
         }).save();
+        await sincronizarSinFallar(`la cafeteria ${doc.nombre}`, () => sincronizarCafeteria(doc));
         return mapCafeteria(doc);
       } catch (error) {
         return manejarDuplicado(
@@ -272,6 +289,7 @@ export const resolversMultiempresa = {
         negocioId: cafeteria.negocioId,
         cafeteriaId: cafeteria._id
       });
+      await sincronizarSinFallar(`el vendedor ${doc.correo}`, () => sincronizarUsuario(doc));
       return mapUsuario(doc);
     }
   }

@@ -28,6 +28,8 @@ import {
 } from "./infrastructure/mongoose-models.js";
 import { ROLES } from "./domain/roles.js";
 import { generarCodigoInvitacion } from "./resolvers/comun.js";
+import { neo4jDriver, conectarNeo4j } from "./infrastructure/neo4j.js";
+import { reconstruirGrafo } from "./infrastructure/grafo.js";
 
 const monedas = [
   { codigo: "MXN", nombre: "Peso mexicano", simbolo: "$", decimales: 2, activa: true },
@@ -337,6 +339,11 @@ await redisClient.del([
   clavesCache.productosPorCafeteria(cafeteria._id),
   clavesCache.productosPorReponer(cafeteria._id)
 ]);
+// Copia la estructura multiempresa al grafo de permisos (Neo4j)
+await conectarNeo4j();
+console.log("Grafo de permisos:", await reconstruirGrafo());
+await neo4jDriver.close();
+
 await redisClient.quit();
 
 await mongoose.disconnect();

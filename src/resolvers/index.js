@@ -29,6 +29,7 @@ import {
   prohibido
 } from "../infrastructure/auth.js";
 import { autorizar, puede } from "../infrastructure/autorizacion.js";
+import { sincronizarUsuario, sincronizarSinFallar } from "../infrastructure/grafo.js";
 import { ROLES } from "../domain/roles.js";
 import {
   datoInvalido,
@@ -402,6 +403,7 @@ export const resolvers = {
         { nombre, correo, password },
         { rol: ROLES.CLIENTE, escuelaId: escuela._id }
       );
+      await sincronizarSinFallar(`el comprador ${doc.correo}`, () => sincronizarUsuario(doc));
       const { token, expiraEn } = await iniciarSesion(doc);
       return { token, expiraEn, usuario: mapUsuario(doc) };
     },
