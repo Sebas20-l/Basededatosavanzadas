@@ -1,5 +1,9 @@
 // Carga los catalogos iniciales (monedas, estados de pedido, escuelas) y un
-// juego de datos de demo: una cafeteria, un usuario para login y productos.
+// juego de datos de demo multiempresa: una escuela con su admin, un negocio con
+// su JEFE, una cafeteria con su VENDEDOR, un CLIENTE y el menu real.
+//
+// Tambien migra datos creados antes de la version multiempresa (usuarios sin
+// rol, escuelas sin codigo de invitacion, cafeterias sin negocio).
 //
 //   npm run seed
 //
@@ -17,10 +21,13 @@ import {
   MonedaModel,
   EstadoPedidoModel,
   EscuelaModel,
+  NegocioModel,
   CafeteriaModel,
   UsuarioModel,
   ProductoModel
 } from "./infrastructure/mongoose-models.js";
+import { ROLES } from "./domain/roles.js";
+import { generarCodigoInvitacion } from "./resolvers/comun.js";
 
 const monedas = [
   { codigo: "MXN", nombre: "Peso mexicano", simbolo: "$", decimales: 2, activa: true },
@@ -65,8 +72,8 @@ const estadosPedido = [
   }
 ];
 
-// Ajusta nombre y clave a los reales de tu escuela.
-const escuelas = [{ clave: "ULSA", nombre: "ULSA", activa: true }];
+// Ajusta nombre, clave y ciudad a los reales de tu escuela.
+const escuelas = [{ clave: "ULSA", nombre: "ULSA", ciudad: "Chihuahua", activa: true }];
 
 async function cargar(modelo, llave, datos) {
   const operaciones = datos.map(dato => ({
@@ -89,34 +96,101 @@ const resumen = {
 };
 console.log("Catalogos cargados:", resumen);
 
-// Se imprimen los ids para poder usarlos en registrarCafeteria(escuelaId: ...)
-const escuelasEnBase = await EscuelaModel.find({}).sort({ clave: 1 });
-for (const escuela of escuelasEnBase) {
-  console.log(`  Escuela ${escuela.clave}: id = ${escuela._id}`);
+// Migracion: escuelas creadas antes de multiempresa no tienen ciudad ni codigo
+for (const escuela of await EscuelaModel.find({ codigoInvitacion: { $exists: false } })) {
+  await EscuelaModel.updateOne(
+    { _id: escuela._id },
+    {
+      $set: {
+        codigoInvitacion: generarCodigoInvitacion(escuela.clave),
+        ciudad: escuela.ciudad || "Sin ciudad"
+      }
+    }
+  );
 }
 
-// ---- Datos de demo (tambien repetibles) ----
-const DEMO_CORREO = "demo@ulsa.mx";
+// Se imprimen los ids y codigos para usarlos en la demo
+const escuelasEnBase = await EscuelaModel.find({}).sort({ clave: 1 });
+for (const escuela of escuelasEnBase) {
+  console.log(`  Escuela ${escuela.clave}: id = ${escuela._id}, codigo de invitacion = ${escuela.codigoInvitacion}`);
+}
+
+// ---- Usuarios de demo (uno por rol, todos con la misma contrasena) ----
 const DEMO_PASSWORD = "demo123";
+const passwordHash = await bcrypt.hash(DEMO_PASSWORD, 10);
+const LIGAS = ["escuelaId", "negocioId", "cafeteriaId"];
+
+// Crea o actualiza un usuario. Las ligas que no aplican a su rol se borran.
+async function usuarioDemo(correo, nombre, ligas) {
+  const existente = await UsuarioModel.findOne({ correo });
+  const _id = existente?._id ?? new mongoose.Types.ObjectId();
+  const $unset = Object.fromEntries(LIGAS.filter(l => !ligas[l]).map(l => [l, ""]));
+  await UsuarioModel.updateOne(
+    { correo },
+    { $set: { nombre, passwordHash, ...ligas }, $unset, $setOnInsert: { _id } },
+    { upsert: true }
+  );
+  return _id;
+}
 
 const escuelaDemo = await EscuelaModel.findOne({ clave: escuelas[0].clave });
-const cafeteria = await CafeteriaModel.findOneAndUpdate(
-  { escuelaId: escuelaDemo._id, nombre: "Cafetería Los Latosos del Chef ULSA" },
-  { $setOnInsert: { activa: true } },
+
+// El JEFE y su negocio se apuntan entre si: se reserva el id del JEFE primero
+const correoJefe = "jefe@ulsa.mx";
+const jefeExistente = await UsuarioModel.findOne({ correo: correoJefe });
+const jefeId = jefeExistente?._id ?? new mongoose.Types.ObjectId();
+const negocio = await NegocioModel.findOneAndUpdate(
+  { nombre: "Los Latosos del Chef" },
+  { $set: { duenoId: jefeId, activo: true }, $addToSet: { escuelaIds: escuelaDemo._id } },
   { upsert: true, new: true }
 );
 
-await UsuarioModel.updateOne(
-  { correo: DEMO_CORREO },
+const cafeteria = await CafeteriaModel.findOneAndUpdate(
+  { escuelaId: escuelaDemo._id, nombre: "Cafetería Los Latosos del Chef ULSA" },
   {
-    $set: {
-      nombre: "Usuario Demo",
-      cafeteriaId: cafeteria._id,
-      passwordHash: await bcrypt.hash(DEMO_PASSWORD, 10)
-    }
+    $set: { negocioId: negocio._id },
+    $setOnInsert: { activa: true, ubicacion: "Edificio central, planta baja" }
   },
-  { upsert: true }
+  { upsert: true, new: true }
 );
+
+const usuariosDemo = [
+  ["admin@cafeenlinea.mx", "Admin Plataforma", { rol: ROLES.ADMIN_PLATAFORMA }],
+  ["admin@ulsa.mx", "Admin ULSA", { rol: ROLES.ADMIN_ESCUELA, escuelaId: escuelaDemo._id }],
+  [correoJefe, "Jefe Latosos", { rol: ROLES.JEFE, escuelaId: escuelaDemo._id, negocioId: negocio._id }],
+  ["vendedor@ulsa.mx", "Vendedor Latosos", {
+    rol: ROLES.VENDEDOR, escuelaId: escuelaDemo._id, negocioId: negocio._id, cafeteriaId: cafeteria._id
+  }],
+  ["demo@ulsa.mx", "Usuario Demo", { rol: ROLES.CLIENTE, escuelaId: escuelaDemo._id }]
+];
+for (const [correo, nombre, ligas] of usuariosDemo) {
+  await usuarioDemo(correo, nombre, ligas);
+}
+
+// Migracion: cafeterias sin negocio pasan al negocio demo (y su escuela tambien)
+const cafeteriasSinNegocio = await CafeteriaModel.find({ negocioId: { $exists: false } });
+for (const huerfana of cafeteriasSinNegocio) {
+  await CafeteriaModel.updateOne({ _id: huerfana._id }, { $set: { negocioId: negocio._id } });
+  await NegocioModel.updateOne({ _id: negocio._id }, { $addToSet: { escuelaIds: huerfana.escuelaId } });
+  console.log(`  Migrada: cafeteria "${huerfana.nombre}" asignada al negocio "${negocio.nombre}"`);
+}
+
+// Migracion: usuarios sin rol eran compradores ligados a una cafeteria.
+// Ahora son CLIENTE de la escuela de esa cafeteria.
+const usuariosSinRol = await UsuarioModel.find({ rol: { $exists: false } });
+for (const usuario of usuariosSinRol) {
+  const suCafeteria = usuario.cafeteriaId ? await CafeteriaModel.findById(usuario.cafeteriaId) : null;
+  await UsuarioModel.updateOne(
+    { _id: usuario._id },
+    {
+      $set: { rol: ROLES.CLIENTE, escuelaId: suCafeteria?.escuelaId ?? escuelaDemo._id },
+      $unset: { cafeteriaId: "" }
+    }
+  );
+}
+if (usuariosSinRol.length) {
+  console.log(`  Migrados: ${usuariosSinRol.length} usuario(s) sin rol ahora son CLIENTE`);
+}
 
 // ---------------------------------------------------------------------------
 // MENU REAL: Cafeteria Los Latosos del Chef ULSA (transcrito del menu impreso).
@@ -248,8 +322,12 @@ for (const p of productosMenu) {
   );
 }
 
+console.log(`  Negocio demo: ${negocio.nombre} (id = ${negocio._id})`);
 console.log(`  Cafeteria demo: id = ${cafeteria._id}`);
-console.log(`  Usuario demo: ${DEMO_CORREO} / ${DEMO_PASSWORD}`);
+console.log(`  Usuarios demo (contrasena "${DEMO_PASSWORD}"):`);
+for (const [correo, , { rol }] of usuariosDemo) {
+  console.log(`    ${rol.padEnd(16)} ${correo}`);
+}
 
 // Los catalogos y productos pudieron cambiar: se limpia su cache en Redis
 await conectarRedis();

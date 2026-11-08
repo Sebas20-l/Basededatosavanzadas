@@ -1,11 +1,8 @@
 import mongoose from "mongoose";
 import bcrypt from "bcryptjs";
-import { GraphQLError } from "graphql";
 import { readFileSync } from "fs";
 import { fileURLToPath } from "url";
 import path from "path";
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
 import {
   MonedaModel,
   EstadoPedidoModel,
@@ -28,8 +25,24 @@ import {
   iniciarSesion,
   cerrarSesion,
   requerirSesion,
-  noAutorizado
+  noAutorizado,
+  prohibido
 } from "../infrastructure/auth.js";
+import { autorizar, puede } from "../infrastructure/autorizacion.js";
+import { ROLES } from "../domain/roles.js";
+import {
+  datoInvalido,
+  manejarDuplicado,
+  normalizarClave,
+  validarId,
+  mapEscuela,
+  mapCafeteria,
+  mapUsuario,
+  crearCuenta
+} from "./comun.js";
+import { resolversMultiempresa } from "./multiempresa.js";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // El reporte de mas vendidos solo cuenta pedidos con este estado del catalogo.
 // (No se usa "cualquier estado final" porque un futuro CANCELADO tambien seria final.)
@@ -59,18 +72,6 @@ function mapEstadoPedido(doc) {
     esFinal: doc.esFinal,
     transiciones: doc.transiciones
   };
-}
-
-function mapEscuela(doc) {
-  return { id: doc._id, clave: doc.clave, nombre: doc.nombre, activa: doc.activa };
-}
-
-function mapCafeteria(doc) {
-  return { id: doc._id, nombre: doc.nombre, escuelaId: doc.escuelaId, activa: doc.activa };
-}
-
-function mapUsuario(doc) {
-  return { id: doc._id, nombre: doc.nombre, correo: doc.correo, cafeteriaId: doc.cafeteriaId };
 }
 
 function mapDinero(dinero) {
@@ -126,14 +127,6 @@ function mapPedido(doc) {
 // -------------------------------------------------
 // Helpers
 // -------------------------------------------------
-const normalizarClave = valor => String(valor).trim().toUpperCase();
-
-function entradaInvalida(mensaje) {
-  return new GraphQLError(mensaje, {
-    extensions: { code: "BAD_USER_INPUT" }
-  });
-}
-
 // Lee una moneda del catalogo y la convierte en objeto de dominio.
 async function obtenerMonedaDominio(codigo) {
   const doc = await MonedaModel.findOne({ codigo: normalizarClave(codigo) });
@@ -164,64 +157,12 @@ async function invalidarProductos(cafeteriaId, productoIds = []) {
   );
 }
 
-// Convierte el error crudo de "llave duplicada" de Mongo en un mensaje claro.
-function manejarDuplicado(error, mensaje) {
-  if (error?.code === 11000) {
-    throw new Error(mensaje);
-  }
-  throw error;
-}
-
-// Error de validacion que la app puede mostrar tal cual.
-function datoInvalido(mensaje) {
-  return new GraphQLError(mensaje, { extensions: { code: "BAD_USER_INPUT" } });
-}
-
-const FORMATO_CORREO = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const PASSWORD_MIN = 6;
-
-// Valida los datos y crea el usuario. La usan registrarUsuario y registro.
-async function crearUsuario({ nombre, correo, password, cafeteriaId }) {
-  const nombreLimpio = String(nombre).trim();
-  const correoLimpio = String(correo).trim().toLowerCase();
-
-  if (!nombreLimpio) {
-    throw datoInvalido("El nombre es obligatorio.");
-  }
-  if (correoLimpio.length > 254 || !FORMATO_CORREO.test(correoLimpio)) {
-    throw datoInvalido("El correo no tiene un formato valido.");
-  }
-  if (password.length < PASSWORD_MIN) {
-    throw datoInvalido(`La contrasena debe tener al menos ${PASSWORD_MIN} caracteres.`);
-  }
-  if (!mongoose.isValidObjectId(cafeteriaId)) {
-    throw datoInvalido("La cafeteria indicada no existe.");
-  }
-
-  const cafeteria = await CafeteriaModel.findById(cafeteriaId);
-  if (!cafeteria) {
-    throw datoInvalido("La cafeteria indicada no existe.");
-  }
-  if (!cafeteria.activa) {
-    throw datoInvalido("La cafeteria indicada esta inactiva.");
-  }
-
-  try {
-    const passwordHash = await bcrypt.hash(password, 10);
-    return await new UsuarioModel({
-      nombre: nombreLimpio,
-      correo: correoLimpio,
-      passwordHash,
-      cafeteriaId
-    }).save();
-  } catch (error) {
-    if (error?.code === 11000) {
-      throw new GraphQLError(`Ya existe un usuario con el correo "${correoLimpio}".`, {
-        extensions: { code: "CORREO_DUPLICADO" }
-      });
-    }
-    throw error;
-  }
+// Un pedido lo puede ver quien lo hizo o quien gestiona su cafeteria.
+async function validarAccesoPedido(contexto, pedido) {
+  const { usuarioId } = requerirSesion(contexto);
+  if (String(pedido.usuarioId) === String(usuarioId)) return;
+  if (await puede(usuarioId, "PEDIDO_LEER_CAFETERIA", { cafeteriaId: pedido.cafeteriaId })) return;
+  throw prohibido("No puedes ver este pedido.");
 }
 
 // Pipeline de agregacion: productos mas vendidos DENTRO de una cafeteria
@@ -275,8 +216,13 @@ async function calcularProductosMasVendidos(cafeteriaId) {
 }
 
 export const resolvers = {
+  Escuela: resolversMultiempresa.Escuela,
+  Negocio: resolversMultiempresa.Negocio,
+  Usuario: resolversMultiempresa.Usuario,
+
   // Un Cafeteria expone su escuela completa, no solo el id.
   Cafeteria: {
+    ...resolversMultiempresa.Cafeteria,
     escuela: async cafeteria => {
       const doc = await EscuelaModel.findById(cafeteria.escuelaId);
       if (!doc) {
@@ -287,8 +233,10 @@ export const resolvers = {
   },
 
   Query: {
+    ...resolversMultiempresa.Query,
+
     // ---- Sesion ----
-        terminos: () =>
+    terminos: () =>
       readFileSync(path.join(__dirname, "../contenido/terminos.md"), "utf8"),
     me: async (_, __, contexto) => {
       const { usuarioId } = requerirSesion(contexto);
@@ -312,8 +260,9 @@ export const resolvers = {
         return docs.map(mapEstadoPedido);
       }),
 
+    // Catalogo publico: solo escuelas activas (ver tambien catalogoEscuelas)
     escuelas: async () => {
-      const docs = await EscuelaModel.find({}).sort({ nombre: 1 });
+      const docs = await EscuelaModel.find({ activa: true }).sort({ nombre: 1 });
       return docs.map(mapEscuela);
     },
 
@@ -328,7 +277,7 @@ export const resolvers = {
     },
 
     cafeterias: async () => {
-      const docs = await CafeteriaModel.find({});
+      const docs = await CafeteriaModel.find({ activa: true }).sort({ nombre: 1 });
       return docs.map(mapCafeteria);
     },
 
@@ -338,7 +287,8 @@ export const resolvers = {
     },
 
     cafeteriasPorEscuela: async (_, { escuelaId }) => {
-      const docs = await CafeteriaModel.find({ escuelaId });
+      validarId(escuelaId, "escuela");
+      const docs = await CafeteriaModel.find({ escuelaId, activa: true }).sort({ nombre: 1 });
       return docs.map(mapCafeteria);
     },
 
@@ -356,39 +306,61 @@ export const resolvers = {
       }),
 
     // Productos que ya llegaron a su punto de reorden (stock <= puntoReorden).
-    productosPorReponer: (_, { cafeteriaId }) =>
-      obtenerConCache(clavesCache.productosPorReponer(cafeteriaId), async () => {
+    productosPorReponer: async (_, { cafeteriaId }, contexto) => {
+      await autorizar(contexto, "INVENTARIO_REPONER", { cafeteriaId });
+      return obtenerConCache(clavesCache.productosPorReponer(cafeteriaId), async () => {
         const docs = await ProductoModel.find({
           cafeteriaId,
           $expr: { $lte: ["$inventario.stock", "$inventario.puntoReorden"] }
         });
         return docs.map(mapProducto);
-      }),
-
-    // ---- Pedidos ----
-    pedido: async (_, { id }) => {
-      const doc = await PedidoModel.findById(id);
-      return doc ? mapPedido(doc) : null;
+      });
     },
 
-    pedidosPorUsuario: async (_, { usuarioId }) => {
-      const docs = await PedidoModel.find({ usuarioId });
+    // ---- Pedidos ----
+    pedido: async (_, { id }, contexto) => {
+      validarId(id, "pedido");
+      const doc = await PedidoModel.findById(id);
+      if (!doc) return null;
+      await validarAccesoPedido(contexto, doc);
+      return mapPedido(doc);
+    },
+
+    // Los pedidos del usuario que inicio sesion
+    misPedidos: async (_, __, contexto) => {
+      const { usuarioId } = await autorizar(contexto, "PEDIDO_LEER_PROPIOS");
+      const docs = await PedidoModel.find({ usuarioId }).sort({ createdAt: -1 });
       return docs.map(mapPedido);
     },
 
-    pedidosPorCafeteria: async (_, { cafeteriaId }) => {
-      const docs = await PedidoModel.find({ cafeteriaId });
+    // Se mantiene por compatibilidad con la app: solo devuelve los pedidos propios
+    pedidosPorUsuario: async (_, { usuarioId }, contexto) => {
+      const auth = await autorizar(contexto, "PEDIDO_LEER_PROPIOS");
+      if (String(auth.usuarioId) !== String(usuarioId)) {
+        throw prohibido("Solo puedes ver tus propios pedidos.");
+      }
+      const docs = await PedidoModel.find({ usuarioId }).sort({ createdAt: -1 });
+      return docs.map(mapPedido);
+    },
+
+    pedidosPorCafeteria: async (_, { cafeteriaId }, contexto) => {
+      await autorizar(contexto, "PEDIDO_LEER_CAFETERIA", { cafeteriaId });
+      const docs = await PedidoModel.find({ cafeteriaId }).sort({ createdAt: -1 });
       return docs.map(mapPedido);
     },
 
     // Reporte analitico (pipeline de agregacion), tambien con cache-aside
-    productosMasVendidos: (_, { cafeteriaId }) =>
-      obtenerConCache(clavesCache.productosMasVendidos(cafeteriaId), () =>
+    productosMasVendidos: async (_, { cafeteriaId }, contexto) => {
+      await autorizar(contexto, "REPORTE_VENTAS_LEER", { cafeteriaId });
+      return obtenerConCache(clavesCache.productosMasVendidos(cafeteriaId), () =>
         calcularProductosMasVendidos(cafeteriaId)
-      )
+      );
+    }
   },
 
   Mutation: {
+    ...resolversMultiempresa.Mutation,
+
     // ---- Sesion ----
     login: async (_, { correo, password }) => {
       // Se aplica la misma normalizacion usada al registrar la cuenta.
@@ -400,13 +372,37 @@ export const resolvers = {
       if (!valido) {
         throw noAutorizado("Correo o contrasena incorrectos.");
       }
-      const { token, expiraEn } = await iniciarSesion(doc._id);
+      const { token, expiraEn } = await iniciarSesion(doc);
       return { token, expiraEn, usuario: mapUsuario(doc) };
     },
 
-    registro: async (_, datos) => {
-      const doc = await crearUsuario(datos);
-      const { token, expiraEn } = await iniciarSesion(doc._id);
+    // Registro publico de compradores (rol CLIENTE). El comprador elige su
+    // escuela del catalogo; por compatibilidad con la app tambien se acepta
+    // una cafeteria, y se toma la escuela de esa cafeteria.
+    registro: async (_, { nombre, correo, password, escuelaId, cafeteriaId }) => {
+      let escuelaElegida = escuelaId;
+      if (!escuelaElegida && cafeteriaId) {
+        validarId(cafeteriaId, "cafeteria");
+        const cafeteria = await CafeteriaModel.findById(cafeteriaId);
+        if (!cafeteria || !cafeteria.activa) {
+          throw datoInvalido("La cafeteria indicada no existe o esta inactiva.");
+        }
+        escuelaElegida = cafeteria.escuelaId;
+      }
+      if (!escuelaElegida) {
+        throw datoInvalido("Debes elegir tu escuela.");
+      }
+      validarId(escuelaElegida, "escuela");
+      const escuela = await EscuelaModel.findById(escuelaElegida);
+      if (!escuela || !escuela.activa) {
+        throw datoInvalido("La escuela indicada no existe o esta suspendida.");
+      }
+
+      const doc = await crearCuenta(
+        { nombre, correo, password },
+        { rol: ROLES.CLIENTE, escuelaId: escuela._id }
+      );
+      const { token, expiraEn } = await iniciarSesion(doc);
       return { token, expiraEn, usuario: mapUsuario(doc) };
     },
 
@@ -416,7 +412,8 @@ export const resolvers = {
     },
 
     // ---- Catalogos ----
-    registrarMoneda: async (_, { codigo, nombre, simbolo, decimales }) => {
+    registrarMoneda: async (_, { codigo, nombre, simbolo, decimales }, contexto) => {
+      await autorizar(contexto, "PLATAFORMA_ADMINISTRAR");
       try {
         const doc = await new MonedaModel({ codigo, nombre, simbolo, decimales }).save();
         await invalidarCache(clavesCache.monedas());
@@ -426,39 +423,14 @@ export const resolvers = {
       }
     },
 
-    registrarEscuela: async (_, { clave, nombre }) => {
-      try {
-        const doc = await new EscuelaModel({ clave, nombre }).save();
-        return mapEscuela(doc);
-      } catch (error) {
-        return manejarDuplicado(error, `Ya existe una escuela con la clave "${normalizarClave(clave)}".`);
-      }
-    },
-
-    registrarCafeteria: async (_, { nombre, escuelaId }) => {
-      const escuela = await EscuelaModel.findById(escuelaId);
-      if (!escuela) {
-        throw new Error("La escuela indicada no existe.");
-      }
-      if (!escuela.activa) {
-        throw new Error("La escuela indicada esta inactiva.");
-      }
-
-      try {
-        const doc = await new CafeteriaModel({ nombre, escuelaId }).save();
-        return mapCafeteria(doc);
-      } catch (error) {
-        return manejarDuplicado(error, `La escuela "${escuela.clave}" ya tiene una cafeteria llamada "${nombre}".`);
-      }
-    },
-
-    registrarUsuario: async (_, datos) => mapUsuario(await crearUsuario(datos)),
-
     // ---- Productos e inventario ----
     registrarProducto: async (_, {
       nombre, precio, disponible, inventario, cafeteriaId,
       descripcion, categoria, imagenUrl, destacado, etiqueta
-    }) => {
+    }, contexto) => {
+      validarId(cafeteriaId, "cafeteria");
+      // Solo quien vende en esa cafeteria (o su jefe) puede agregar al menu
+      await autorizar(contexto, "PRODUCTO_GESTIONAR", { cafeteriaId });
       const cafeteria = await CafeteriaModel.findById(cafeteriaId);
       if (!cafeteria) {
         throw new Error("La cafeteria indicada no existe.");
@@ -502,11 +474,13 @@ export const resolvers = {
 
     // Restock: suma unidades al stock. Sin cantidad, usa la cantidad de
     // reposicion configurada en el producto.
-    reponerInventario: async (_, { productoId, cantidad }) => {
+    reponerInventario: async (_, { productoId, cantidad }, contexto) => {
+      validarId(productoId, "producto");
       const producto = await ProductoModel.findById(productoId);
       if (!producto) {
         throw new Error("El producto no existe.");
       }
+      await autorizar(contexto, "INVENTARIO_REPONER", { cafeteriaId: producto.cafeteriaId });
 
       const unidades = cantidad ?? producto.inventario.cantidadReposicion;
       if (unidades <= 0) {
@@ -524,14 +498,17 @@ export const resolvers = {
     },
 
     // ---- Pedidos ----
-    crearPedido: async (_, { usuarioId, cafeteriaId, items }) => {
-      const usuario = await UsuarioModel.findById(usuarioId);
-      if (!usuario) {
-        throw new Error("El usuario no existe.");
+    // El pedido siempre es del usuario de la sesion. Regla multi-tenant: solo
+    // se puede pedir en cafeterias de la escuela a la que pertenece el usuario.
+    crearPedido: async (_, { usuarioId: usuarioIdEnviado, cafeteriaId, items }, contexto) => {
+      validarId(cafeteriaId, "cafeteria");
+      const { usuarioId } = await autorizar(contexto, "PEDIDO_CREAR", { cafeteriaId });
+      if (usuarioIdEnviado && String(usuarioIdEnviado) !== String(usuarioId)) {
+        throw prohibido("No puedes hacer pedidos a nombre de otro usuario.");
       }
-      // Regla multi-tenant: el usuario debe pertenecer a la cafeteria del pedido
-      if (String(usuario.cafeteriaId) !== String(cafeteriaId)) {
-        throw new Error("El usuario no pertenece a esta cafeteria.");
+      const cafeteria = await CafeteriaModel.findById(cafeteriaId);
+      if (!cafeteria?.activa) {
+        throw datoInvalido("La cafeteria no existe o esta cerrada.");
       }
 
       // Todo pedido nuevo nace en el estado marcado como inicial en el catalogo
@@ -638,11 +615,13 @@ export const resolvers = {
       return mapPedido(pedidoGuardado);
     },
 
-    actualizarEstadoPedido: async (_, { pedidoId, nuevoEstado }) => {
+    actualizarEstadoPedido: async (_, { pedidoId, nuevoEstado }, contexto) => {
+      validarId(pedidoId, "pedido");
       const doc = await PedidoModel.findById(pedidoId);
       if (!doc) {
         throw new Error("El pedido no existe.");
       }
+      await autorizar(contexto, "PEDIDO_CAMBIAR_ESTADO", { cafeteriaId: doc.cafeteriaId });
 
       // Ambos estados deben existir en el catalogo, y la transicion tambien
       // se valida contra lo que dice el catalogo.

@@ -18,15 +18,30 @@ if (!process.env.JWT_SECRET) {
 
 const claveSesion = jti => `sesion:${jti}`;
 
+// 403: hay sesion, pero el usuario no tiene permiso para esa accion.
+export function prohibido(mensaje = "No tienes permiso para realizar esta accion.") {
+  return new GraphQLError(mensaje, {
+    extensions: { code: "FORBIDDEN", http: { status: 403 } }
+  });
+}
+
 export function noAutorizado(mensaje = "No autorizado.") {
   return new GraphQLError(mensaje, {
     extensions: { code: "UNAUTHENTICATED", http: { status: 401 } }
   });
 }
 
-export async function iniciarSesion(usuarioId) {
+// El token lleva el rol y la escuela del usuario para que cada peticion sepa
+// a que tenant (escuela) pertenece sin consultar MongoDB.
+export async function iniciarSesion(usuario) {
+  const usuarioId = usuario._id;
   const jti = randomUUID();
-  const token = jwt.sign({ sub: String(usuarioId) }, JWT_SECRET, {
+  const datos = {
+    sub: String(usuarioId),
+    rol: usuario.rol,
+    esc: usuario.escuelaId ? String(usuario.escuelaId) : null
+  };
+  const token = jwt.sign(datos, JWT_SECRET, {
     jwtid: jti,
     expiresIn: SESION_TTL_SEGUNDOS
   });
@@ -74,7 +89,14 @@ export async function construirContexto({ req }) {
     throw noAutorizado("La sesion fue cerrada o expiro. Inicia sesion de nuevo.");
   }
 
-  return { auth: { usuarioId: payload.sub, jti: payload.jti } };
+  return {
+    auth: {
+      usuarioId: payload.sub,
+      jti: payload.jti,
+      rol: payload.rol ?? null,
+      escuelaId: payload.esc ?? null
+    }
+  };
 }
 
 // Para resolvers que exigen sesion iniciada.
