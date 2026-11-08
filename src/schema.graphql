@@ -170,6 +170,27 @@ type EstimacionRecogida {
   pedidosEnCola: Int!
 }
 
+# Un cambio de estado guardado en Cassandra
+type EventoPedido {
+  pedidoId: ID!
+  estado: String!
+  # Fecha ISO 8601
+  fecha: String!
+  usuarioId: ID
+  cafeteriaId: ID
+  total: Float
+}
+
+# Metricas de una hora del dia (contadores de Cassandra)
+type VentaPorHora {
+  # 0 a 23, hora local de la escuela
+  hora: Int!
+  pedidos: Int!
+  piezas: Int!
+  entregados: Int!
+  ingresos: Float!
+}
+
 type Notificacion {
   pedidoId: ID!
   estado: String!
@@ -305,6 +326,13 @@ type Query {
   colaCafeteria(cafeteriaId: ID!): [Pedido!]!
   # Publica: tiempo y hora de recogida si se pide ahora
   estimarRecogida(cafeteriaId: ID!, items: [ItemPedidoInput!]!): EstimacionRecogida!
+  # ---- Reportes desde Cassandra (dia con formato AAAA-MM-DD; por defecto hoy) ----
+  # Bitacora de un pedido: lo ve quien lo hizo o quien gestiona la cafeteria
+  eventosPedido(pedidoId: ID!): [EventoPedido!]!
+  # VENDEDOR o JEFE: todo lo que paso en la cafeteria ese dia, lo mas reciente primero
+  actividadCafeteria(cafeteriaId: ID!, dia: String, limite: Int = 100): [EventoPedido!]!
+  # JEFE: pedidos y ventas por hora del dia
+  horasPico(cafeteriaId: ID!, dia: String): [VentaPorHora!]!
   # Avisos de cambios de estado de mis pedidos (mas recientes primero)
   misNotificaciones(limite: Int = 20): [Notificacion!]!
 

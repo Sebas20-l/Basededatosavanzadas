@@ -1,4 +1,4 @@
-# Topologia del Segundo Parcial: tres motores NoSQL en una red privada.
+# Topologia del proyecto: cuatro motores NoSQL en una red privada.
 #
 #   docker compose up -d
 #
@@ -59,6 +59,31 @@ services:
     networks:
       - bda-network
 
+  # -------------------------------------------------------------
+  # Cassandra: bitacora de eventos de pedidos y metricas por hora
+  # (tarda ~1 minuto en arrancar la primera vez)
+  # -------------------------------------------------------------
+  cassandra:
+    image: cassandra:5.0
+    container_name: bda-cassandra
+    restart: unless-stopped
+    ports:
+      - "9042:9042"     # Protocolo CQL (cassandra-driver)
+    environment:
+      CASSANDRA_CLUSTER_NAME: bda-cluster
+      # Limita la memoria para que corra en una laptop
+      MAX_HEAP_SIZE: 512M
+      HEAP_NEWSIZE: 128M
+    healthcheck:
+      test: ["CMD-SHELL", "cqlsh -e 'DESCRIBE KEYSPACES' || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+    volumes:
+      - cassandra_data:/var/lib/cassandra
+    networks:
+      - bda-network
+
 networks:
   bda-network:
     driver: bridge
@@ -67,3 +92,4 @@ volumes:
   mongodb_data:
   redis_data:
   neo4j_data:
+  cassandra_data:
