@@ -93,12 +93,32 @@ export class Inventario {
 // -------------------------------------------------
 // `precio` es { monto, moneda } donde moneda es el codigo del catalogo (MXN, JPY...).
 export class Producto {
-  constructor(id, nombre, precio, disponible, inventario) {
+  constructor(id, nombre, precio, disponible, inventario, tiempoPreparacionMin = 5) {
     this.id = id;
     this.nombre = nombre;
     this.precio = precio;
     this.disponible = disponible;
     this.inventario = inventario;
+    this.tiempoPreparacionMin = tiempoPreparacionMin;
+  }
+
+  validarNombre() {
+    if (!String(this.nombre ?? "").trim()) {
+      throw new Error("El producto necesita un nombre.");
+    }
+  }
+
+  // Regla de negocio: el tiempo de preparacion es un entero entre 1 y 120 minutos.
+  validarTiempoPreparacion() {
+    const minutos = this.tiempoPreparacionMin;
+    if (!Number.isInteger(minutos) || minutos < 1 || minutos > 120) {
+      throw new Error(`El tiempo de preparacion de "${this.nombre}" debe ser de 1 a 120 minutos.`);
+    }
+  }
+
+  // Un producto se muestra como agotado si el vendedor lo pauso o ya no hay stock.
+  estaAgotado() {
+    return !this.disponible || this.inventario.stock <= 0;
   }
 
   validarPrecioPositivo() {
@@ -109,6 +129,41 @@ export class Producto {
 
   validarInventario() {
     this.inventario.validar();
+  }
+}
+
+// -------------------------------------------------
+// Pickup: tiempo estimado y hora de recogida
+// -------------------------------------------------
+
+// Regla de negocio: un pedido tarda lo que su platillo mas lento, mas 1 minuto
+// por cada pieza adicional; y espera a que la cocina saque los pedidos que ya
+// estan en cola, que se preparan de `capacidadParalela` en `capacidadParalela`.
+//   items: [{ tiempoPreparacionMin, cantidad }]
+export function calcularTiempoEstimado(items, minutosEnCola = 0, capacidadParalela = 2) {
+  if (!items || items.length === 0) {
+    throw new Error("No se puede estimar el tiempo de un pedido vacio.");
+  }
+  const masLento = Math.max(...items.map(item => item.tiempoPreparacionMin ?? 5));
+  const piezas = items.reduce((suma, item) => suma + item.cantidad, 0);
+  const preparacion = masLento + Math.max(0, piezas - 1);
+  const espera = Math.ceil(Math.max(0, minutosEnCola) / Math.max(1, capacidadParalela));
+  return { preparacionMin: preparacion, esperaMin: espera, totalMin: preparacion + espera };
+}
+
+// Regla de negocio: el cliente puede pedir que se lo tengan mas tarde, pero no
+// antes de lo que tarda la cocina ni con mas de `maxHoras` de anticipacion.
+export function validarHoraRecogida(solicitada, masTemprana, ahora = new Date(), maxHoras = 12) {
+  if (Number.isNaN(solicitada.getTime())) {
+    throw new Error("La hora de recogida no es una fecha valida (usa formato ISO 8601).");
+  }
+  if (solicitada < masTemprana) {
+    throw new Error(
+      `Lo mas pronto que puede estar tu pedido es ${masTemprana.toISOString()}; elige esa hora o una posterior.`
+    );
+  }
+  if (solicitada - ahora > maxHoras * 60 * 60 * 1000) {
+    throw new Error(`Solo puedes programar pedidos con ${maxHoras} horas de anticipacion como maximo.`);
   }
 }
 

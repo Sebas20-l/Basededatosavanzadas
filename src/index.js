@@ -6,6 +6,7 @@ import { fileURLToPath } from "url";
 import path from "path";
 import { conectarBaseDatos } from "./infrastructure/db.js";
 import { conectarRedis } from "./infrastructure/redis.js";
+import { conectarNeo4j } from "./infrastructure/neo4j.js";
 import { construirContexto } from "./infrastructure/auth.js";
 import { resolvers } from "./resolvers/index.js";
 
@@ -14,6 +15,7 @@ const typeDefs = readFileSync(path.join(__dirname, "schema.graphql"), "utf8");
 
 await conectarBaseDatos();
 await conectarRedis();
+await conectarNeo4j();
 
 const server = new ApolloServer({ typeDefs, resolvers });
 

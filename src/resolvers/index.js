@@ -1,11 +1,9 @@
 import mongoose from "mongoose";
 import bcrypt from "bcryptjs";
-import { GraphQLError } from "graphql";
+import { randomInt } from "node:crypto";
 import { readFileSync } from "fs";
 import { fileURLToPath } from "url";
 import path from "path";
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
 import {
   MonedaModel,
   EstadoPedidoModel,
@@ -21,15 +19,43 @@ import {
   Inventario,
   Producto,
   ItemPedido,
-  Pedido
+  Pedido,
+  calcularTiempoEstimado,
+  validarHoraRecogida
 } from "../domain/entities.js";
+import {
+  agregarACola,
+  quitarDeCola,
+  estadoCola,
+  posicionEnCola,
+  CAPACIDAD_PARALELA
+} from "../infrastructure/cola.js";
+import { notificar, leerNotificaciones } from "../infrastructure/notificaciones.js";
 import { obtenerConCache, invalidarCache, clavesCache } from "../infrastructure/cache.js";
 import {
   iniciarSesion,
   cerrarSesion,
   requerirSesion,
-  noAutorizado
+  noAutorizado,
+  prohibido
 } from "../infrastructure/auth.js";
+import { autorizar, puede } from "../infrastructure/autorizacion.js";
+import { sincronizarUsuario, sincronizarSinFallar } from "../infrastructure/grafo.js";
+import { ROLES } from "../domain/roles.js";
+import {
+  datoInvalido,
+  enTransaccion,
+  manejarDuplicado,
+  normalizarClave,
+  validarId,
+  mapEscuela,
+  mapCafeteria,
+  mapUsuario,
+  crearCuenta
+} from "./comun.js";
+import { resolversMultiempresa } from "./multiempresa.js";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // El reporte de mas vendidos solo cuenta pedidos con este estado del catalogo.
 // (No se usa "cualquier estado final" porque un futuro CANCELADO tambien seria final.)
@@ -59,18 +85,6 @@ function mapEstadoPedido(doc) {
     esFinal: doc.esFinal,
     transiciones: doc.transiciones
   };
-}
-
-function mapEscuela(doc) {
-  return { id: doc._id, clave: doc.clave, nombre: doc.nombre, activa: doc.activa };
-}
-
-function mapCafeteria(doc) {
-  return { id: doc._id, nombre: doc.nombre, escuelaId: doc.escuelaId, activa: doc.activa };
-}
-
-function mapUsuario(doc) {
-  return { id: doc._id, nombre: doc.nombre, correo: doc.correo, cafeteriaId: doc.cafeteriaId };
 }
 
 function mapDinero(dinero) {
@@ -103,8 +117,25 @@ function mapProducto(doc) {
     imagenUrl: doc.imagenUrl || null,
     destacado: doc.destacado ?? false,
     etiqueta: doc.etiqueta ?? "",
+    tiempoPreparacionMin: doc.tiempoPreparacionMin ?? 5,
+    agotado: !doc.disponible || doc.inventario.stock <= 0,
     cafeteriaId: doc.cafeteriaId
   };
+}
+
+// Valida y normaliza un precio contra el catalogo de monedas.
+async function precioValidado(precio) {
+  const moneda = await obtenerMonedaDominio(precio.moneda);
+  moneda.validarMonto(precio.monto);
+  return { monto: precio.monto, moneda: moneda.codigo };
+}
+
+// Convierte los errores de validacion de Mongoose en un mensaje claro para la app.
+function validacionMongoose(error) {
+  if (error?.name === "ValidationError") {
+    return datoInvalido(Object.values(error.errors)[0].message);
+  }
+  return error;
 }
 
 function mapPedido(doc) {
@@ -119,15 +150,115 @@ function mapPedido(doc) {
       cantidad: item.cantidad
     })),
     total: mapDinero(doc.total),
-    estado: doc.estado
+    estado: doc.estado,
+    notas: doc.notas ?? "",
+    tiempoEstimadoMin: doc.tiempoEstimadoMin ?? null,
+    horaRecogida: doc.horaRecogida ? doc.horaRecogida.toISOString() : null,
+    // Pedido.codigoRecogida decide si se muestra (solo al dueno del pedido)
+    codigoRecogida: doc.codigoRecogida ?? null,
+    historial: (doc.historial ?? []).map(cambio => ({
+      estado: cambio.estado,
+      fecha: cambio.fecha.toISOString(),
+      usuarioId: cambio.usuarioId ?? null
+    })),
+    creadoEn: doc.createdAt ? doc.createdAt.toISOString() : null
   };
+}
+
+// -------------------------------------------------
+// Pickup
+// -------------------------------------------------
+const ZONA_HORARIA = process.env.ZONA_HORARIA || "America/Chihuahua";
+// Estados en los que la cocina ya no trabaja en el pedido (sale de la cola)
+const ESTADOS_FUERA_DE_COLA = ["LISTO", "ENTREGADO", "CANCELADO"];
+
+const horaLegible = fecha =>
+  fecha.toLocaleTimeString("es-MX", { hour: "2-digit", minute: "2-digit", timeZone: ZONA_HORARIA });
+
+function mensajeDeEstado(pedido) {
+  switch (pedido.estado) {
+    case "ACEPTADO":
+      return pedido.horaRecogida
+        ? `La cafeteria acepto tu pedido. Recogelo a las ${horaLegible(pedido.horaRecogida)}.`
+        : "La cafeteria acepto tu pedido.";
+    case "EN_PREPARACION":
+      return "Tu pedido se esta preparando.";
+    case "LISTO":
+      return pedido.codigoRecogida
+        ? `¡Tu pedido esta listo! Muestra el codigo ${pedido.codigoRecogida} al recogerlo.`
+        : "¡Tu pedido esta listo para recoger!";
+    case "ENTREGADO":
+      return "Pedido entregado. ¡Buen provecho!";
+    case "CANCELADO":
+      return "Tu pedido fue cancelado y no se te cobrara.";
+    default:
+      return `Tu pedido cambio a ${pedido.estado}.`;
+  }
+}
+
+// Regresa al inventario lo que el pedido habia descontado
+async function devolverStock(pedido, session) {
+  for (const item of pedido.items) {
+    await ProductoModel.updateOne(
+      { _id: item.productoId },
+      { $inc: { "inventario.stock": item.cantidad } },
+      { session }
+    );
+  }
+}
+
+// Valida y aplica un cambio de estado; si es CANCELADO devuelve el stock en
+// la misma transaccion. Despues saca el pedido de la cola y avisa al comprador.
+async function cambiarEstado(pedido, claveNueva, usuarioId) {
+  const estadoActual = await obtenerEstadoDominio(pedido.estado);
+  const estadoNuevo = await obtenerEstadoDominio(claveNueva);
+  estadoActual.validarTransicion(estadoNuevo.clave);
+
+  pedido.estado = estadoNuevo.clave;
+  pedido.historial.push({ estado: estadoNuevo.clave, fecha: new Date(), usuarioId });
+
+  let guardado;
+  if (estadoNuevo.clave === "CANCELADO") {
+    guardado = await enTransaccion(async session => {
+      await devolverStock(pedido, session);
+      return pedido.save({ session });
+    });
+    await invalidarProductos(pedido.cafeteriaId, pedido.items.map(i => String(i.productoId)));
+  } else {
+    guardado = await pedido.save();
+  }
+
+  if (ESTADOS_FUERA_DE_COLA.includes(guardado.estado)) {
+    await quitarDeCola(guardado.cafeteriaId, guardado._id);
+  }
+  await notificar(guardado.usuarioId, {
+    pedidoId: guardado._id,
+    estado: guardado.estado,
+    mensaje: mensajeDeEstado(guardado)
+  });
+  // El reporte de mas vendidos cuenta pedidos ENTREGADO: puede cambiar
+  await invalidarCache(clavesCache.productosMasVendidos(guardado.cafeteriaId));
+  return guardado;
+}
+
+// Productos (con su tiempo de preparacion) de una lista de items de ESTA cafeteria
+async function tiemposDeItems(cafeteriaId, items) {
+  const ids = items.map(item => item.productoId);
+  ids.forEach(id => validarId(id, "producto"));
+  const productos = await ProductoModel.find({ _id: { $in: ids }, cafeteriaId })
+    .select("tiempoPreparacionMin");
+  const tiempos = new Map(productos.map(p => [String(p._id), p.tiempoPreparacionMin ?? 5]));
+  return items.map(item => {
+    if (!tiempos.has(String(item.productoId))) {
+      throw datoInvalido(`El producto ${item.productoId} no es de esta cafeteria.`);
+    }
+    return { tiempoPreparacionMin: tiempos.get(String(item.productoId)), cantidad: item.cantidad };
+  });
 }
 
 // -------------------------------------------------
 // Helpers
 // -------------------------------------------------
-const normalizarClave = valor => String(valor).trim().toUpperCase();
-
 // Lee una moneda del catalogo y la convierte en objeto de dominio.
 async function obtenerMonedaDominio(codigo) {
   const doc = await MonedaModel.findOne({ codigo: normalizarClave(codigo) });
@@ -158,64 +289,12 @@ async function invalidarProductos(cafeteriaId, productoIds = []) {
   );
 }
 
-// Convierte el error crudo de "llave duplicada" de Mongo en un mensaje claro.
-function manejarDuplicado(error, mensaje) {
-  if (error?.code === 11000) {
-    throw new Error(mensaje);
-  }
-  throw error;
-}
-
-// Error de validacion que la app puede mostrar tal cual.
-function datoInvalido(mensaje) {
-  return new GraphQLError(mensaje, { extensions: { code: "BAD_USER_INPUT" } });
-}
-
-const FORMATO_CORREO = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const PASSWORD_MIN = 6;
-
-// Valida los datos y crea el usuario. La usan registrarUsuario y registro.
-async function crearUsuario({ nombre, correo, password, cafeteriaId }) {
-  const nombreLimpio = String(nombre).trim();
-  const correoLimpio = String(correo).trim().toLowerCase();
-
-  if (!nombreLimpio) {
-    throw datoInvalido("El nombre es obligatorio.");
-  }
-  if (!FORMATO_CORREO.test(correoLimpio)) {
-    throw datoInvalido("El correo no tiene un formato valido.");
-  }
-  if (password.length < PASSWORD_MIN) {
-    throw datoInvalido(`La contrasena debe tener al menos ${PASSWORD_MIN} caracteres.`);
-  }
-  if (!mongoose.isValidObjectId(cafeteriaId)) {
-    throw datoInvalido("La cafeteria indicada no existe.");
-  }
-
-  const cafeteria = await CafeteriaModel.findById(cafeteriaId);
-  if (!cafeteria) {
-    throw datoInvalido("La cafeteria indicada no existe.");
-  }
-  if (!cafeteria.activa) {
-    throw datoInvalido("La cafeteria indicada esta inactiva.");
-  }
-
-  try {
-    const passwordHash = await bcrypt.hash(password, 10);
-    return await new UsuarioModel({
-      nombre: nombreLimpio,
-      correo: correoLimpio,
-      passwordHash,
-      cafeteriaId
-    }).save();
-  } catch (error) {
-    if (error?.code === 11000) {
-      throw new GraphQLError(`Ya existe un usuario con el correo "${correoLimpio}".`, {
-        extensions: { code: "CORREO_DUPLICADO" }
-      });
-    }
-    throw error;
-  }
+// Un pedido lo puede ver quien lo hizo o quien gestiona su cafeteria.
+async function validarAccesoPedido(contexto, pedido) {
+  const { usuarioId } = requerirSesion(contexto);
+  if (String(pedido.usuarioId) === String(usuarioId)) return;
+  if (await puede(usuarioId, "PEDIDO_LEER_CAFETERIA", { cafeteriaId: pedido.cafeteriaId })) return;
+  throw prohibido("No puedes ver este pedido.");
 }
 
 // Pipeline de agregacion: productos mas vendidos DENTRO de una cafeteria
@@ -269,8 +348,30 @@ async function calcularProductosMasVendidos(cafeteriaId) {
 }
 
 export const resolvers = {
+  Escuela: resolversMultiempresa.Escuela,
+  Negocio: resolversMultiempresa.Negocio,
+  Usuario: resolversMultiempresa.Usuario,
+
+  Pedido: {
+    // El codigo solo lo ve quien hizo el pedido; el vendedor se lo pide al recoger
+    codigoRecogida: (pedido, _, contexto) =>
+      contexto.auth && String(contexto.auth.usuarioId) === String(pedido.usuarioId)
+        ? pedido.codigoRecogida
+        : null,
+    posicionEnCola: pedido => posicionEnCola(pedido.cafeteriaId, pedido.id)
+  },
+
+  // Cada producto puede mostrar su cafeteria (util en dondeHay)
+  Producto: {
+    cafeteria: async producto => {
+      const doc = await CafeteriaModel.findById(producto.cafeteriaId);
+      return doc ? mapCafeteria(doc) : null;
+    }
+  },
+
   // Un Cafeteria expone su escuela completa, no solo el id.
   Cafeteria: {
+    ...resolversMultiempresa.Cafeteria,
     escuela: async cafeteria => {
       const doc = await EscuelaModel.findById(cafeteria.escuelaId);
       if (!doc) {
@@ -281,8 +382,10 @@ export const resolvers = {
   },
 
   Query: {
+    ...resolversMultiempresa.Query,
+
     // ---- Sesion ----
-        terminos: () =>
+    terminos: () =>
       readFileSync(path.join(__dirname, "../contenido/terminos.md"), "utf8"),
     me: async (_, __, contexto) => {
       const { usuarioId } = requerirSesion(contexto);
@@ -306,8 +409,9 @@ export const resolvers = {
         return docs.map(mapEstadoPedido);
       }),
 
+    // Catalogo publico: solo escuelas activas (ver tambien catalogoEscuelas)
     escuelas: async () => {
-      const docs = await EscuelaModel.find({}).sort({ nombre: 1 });
+      const docs = await EscuelaModel.find({ activa: true }).sort({ nombre: 1 });
       return docs.map(mapEscuela);
     },
 
@@ -322,7 +426,7 @@ export const resolvers = {
     },
 
     cafeterias: async () => {
-      const docs = await CafeteriaModel.find({});
+      const docs = await CafeteriaModel.find({ activa: true }).sort({ nombre: 1 });
       return docs.map(mapCafeteria);
     },
 
@@ -332,11 +436,58 @@ export const resolvers = {
     },
 
     cafeteriasPorEscuela: async (_, { escuelaId }) => {
-      const docs = await CafeteriaModel.find({ escuelaId });
+      validarId(escuelaId, "escuela");
+      const docs = await CafeteriaModel.find({ escuelaId, activa: true }).sort({ nombre: 1 });
       return docs.map(mapCafeteria);
     },
 
     // ---- Productos e inventario (cache-aside) ----
+    // Menu agrupado por categoria, como lo muestra la app. Usa el mismo cache
+    // que productosPorCafeteria.
+    menuPorCategoria: async (_, { cafeteriaId }) => {
+      validarId(cafeteriaId, "cafeteria");
+      const productos = await obtenerConCache(clavesCache.productosPorCafeteria(cafeteriaId), async () => {
+        const docs = await ProductoModel.find({ cafeteriaId });
+        return docs.map(mapProducto);
+      });
+      const categorias = new Map();
+      for (const producto of productos) {
+        if (!categorias.has(producto.categoria)) categorias.set(producto.categoria, []);
+        categorias.get(producto.categoria).push(producto);
+      }
+      return [...categorias.entries()]
+        .map(([categoria, lista]) => ({
+          categoria,
+          productos: lista.sort((a, b) => Number(b.destacado) - Number(a.destacado) || a.nombre.localeCompare(b.nombre))
+        }))
+        .sort((a, b) => a.categoria.localeCompare(b.categoria));
+    },
+
+    // Si un platillo se acabo, en que otras cafeterias del MISMO negocio y la
+    // MISMA escuela todavia hay (ej. "no hay molletes aqui, pero si en la Cafeteria A")
+    dondeHay: async (_, { productoId }) => {
+      validarId(productoId, "producto");
+      const producto = await ProductoModel.findById(productoId);
+      if (!producto) return [];
+      const cafeteria = await CafeteriaModel.findById(producto.cafeteriaId);
+      if (!cafeteria) return [];
+
+      const hermanas = await CafeteriaModel.find({
+        _id: { $ne: cafeteria._id },
+        negocioId: cafeteria.negocioId,
+        escuelaId: cafeteria.escuelaId,
+        activa: true
+      }).select("_id");
+      const nombre = new RegExp(`^${producto.nombre.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i");
+      const docs = await ProductoModel.find({
+        cafeteriaId: { $in: hermanas.map(c => c._id) },
+        nombre,
+        disponible: true,
+        "inventario.stock": { $gt: 0 }
+      });
+      return docs.map(mapProducto);
+    },
+
     productosPorCafeteria: (_, { cafeteriaId }) =>
       obtenerConCache(clavesCache.productosPorCafeteria(cafeteriaId), async () => {
         const docs = await ProductoModel.find({ cafeteriaId });
@@ -350,55 +501,136 @@ export const resolvers = {
       }),
 
     // Productos que ya llegaron a su punto de reorden (stock <= puntoReorden).
-    productosPorReponer: (_, { cafeteriaId }) =>
-      obtenerConCache(clavesCache.productosPorReponer(cafeteriaId), async () => {
+    productosPorReponer: async (_, { cafeteriaId }, contexto) => {
+      await autorizar(contexto, "INVENTARIO_REPONER", { cafeteriaId });
+      return obtenerConCache(clavesCache.productosPorReponer(cafeteriaId), async () => {
         const docs = await ProductoModel.find({
           cafeteriaId,
           $expr: { $lte: ["$inventario.stock", "$inventario.puntoReorden"] }
         });
         return docs.map(mapProducto);
-      }),
-
-    // ---- Pedidos ----
-    pedido: async (_, { id }) => {
-      const doc = await PedidoModel.findById(id);
-      return doc ? mapPedido(doc) : null;
+      });
     },
 
-    pedidosPorUsuario: async (_, { usuarioId }) => {
-      const docs = await PedidoModel.find({ usuarioId });
+    // ---- Pedidos ----
+    pedido: async (_, { id }, contexto) => {
+      validarId(id, "pedido");
+      const doc = await PedidoModel.findById(id);
+      if (!doc) return null;
+      await validarAccesoPedido(contexto, doc);
+      return mapPedido(doc);
+    },
+
+    // Los pedidos del usuario que inicio sesion
+    misPedidos: async (_, __, contexto) => {
+      const { usuarioId } = await autorizar(contexto, "PEDIDO_LEER_PROPIOS");
+      const docs = await PedidoModel.find({ usuarioId }).sort({ createdAt: -1 });
       return docs.map(mapPedido);
     },
 
-    pedidosPorCafeteria: async (_, { cafeteriaId }) => {
-      const docs = await PedidoModel.find({ cafeteriaId });
+    // Se mantiene por compatibilidad con la app: solo devuelve los pedidos propios
+    pedidosPorUsuario: async (_, { usuarioId }, contexto) => {
+      const auth = await autorizar(contexto, "PEDIDO_LEER_PROPIOS");
+      if (String(auth.usuarioId) !== String(usuarioId)) {
+        throw prohibido("Solo puedes ver tus propios pedidos.");
+      }
+      const docs = await PedidoModel.find({ usuarioId }).sort({ createdAt: -1 });
+      return docs.map(mapPedido);
+    },
+
+    // Pantalla del vendedor: pedidos activos ordenados por hora de recogida
+    colaCafeteria: async (_, { cafeteriaId }, contexto) => {
+      validarId(cafeteriaId, "cafeteria");
+      await autorizar(contexto, "PEDIDO_LEER_CAFETERIA", { cafeteriaId });
+      const docs = await PedidoModel.find({
+        cafeteriaId,
+        estado: { $in: ["PENDIENTE", "ACEPTADO", "EN_PREPARACION", "LISTO"] }
+      }).sort({ horaRecogida: 1, createdAt: 1 });
+      return docs.map(mapPedido);
+    },
+
+    // Antes de pedir: "si pides ahora, recoges a las 10:25"
+    estimarRecogida: async (_, { cafeteriaId, items }) => {
+      validarId(cafeteriaId, "cafeteria");
+      if (!items.length) {
+        throw datoInvalido("Agrega al menos un producto para estimar el tiempo.");
+      }
+      const tiempos = await tiemposDeItems(cafeteriaId, items);
+      const cola = await estadoCola(cafeteriaId);
+      const { totalMin } = calcularTiempoEstimado(tiempos, cola.minutos, CAPACIDAD_PARALELA);
+      return {
+        tiempoEstimadoMin: totalMin,
+        horaRecogida: new Date(Date.now() + totalMin * 60 * 1000).toISOString(),
+        pedidosEnCola: cola.pedidos
+      };
+    },
+
+    misNotificaciones: async (_, { limite }, contexto) => {
+      const { usuarioId } = requerirSesion(contexto);
+      return leerNotificaciones(usuarioId, Math.min(Math.max(limite ?? 20, 1), 50));
+    },
+
+    pedidosPorCafeteria: async (_, { cafeteriaId }, contexto) => {
+      await autorizar(contexto, "PEDIDO_LEER_CAFETERIA", { cafeteriaId });
+      const docs = await PedidoModel.find({ cafeteriaId }).sort({ createdAt: -1 });
       return docs.map(mapPedido);
     },
 
     // Reporte analitico (pipeline de agregacion), tambien con cache-aside
-    productosMasVendidos: (_, { cafeteriaId }) =>
-      obtenerConCache(clavesCache.productosMasVendidos(cafeteriaId), () =>
+    productosMasVendidos: async (_, { cafeteriaId }, contexto) => {
+      await autorizar(contexto, "REPORTE_VENTAS_LEER", { cafeteriaId });
+      return obtenerConCache(clavesCache.productosMasVendidos(cafeteriaId), () =>
         calcularProductosMasVendidos(cafeteriaId)
-      )
+      );
+    }
   },
 
   Mutation: {
+    ...resolversMultiempresa.Mutation,
+
     // ---- Sesion ----
     login: async (_, { correo, password }) => {
-      const doc = await UsuarioModel.findOne({ correo: correo.trim().toLowerCase() })
+      // Se aplica la misma normalizacion usada al registrar la cuenta.
+      const correoNormalizado = correo.trim().toLowerCase();
+      const doc = await UsuarioModel.findOne({ correo: correoNormalizado })
         .select("+passwordHash");
-      // Mismo mensaje si no existe el correo o si la contrasena esta mal
+      // No revela si fallo el correo o la contrasena; compara contra el hash guardado.
       const valido = doc?.passwordHash && (await bcrypt.compare(password, doc.passwordHash));
       if (!valido) {
         throw noAutorizado("Correo o contrasena incorrectos.");
       }
-      const { token, expiraEn } = await iniciarSesion(doc._id);
+      const { token, expiraEn } = await iniciarSesion(doc);
       return { token, expiraEn, usuario: mapUsuario(doc) };
     },
 
-    registro: async (_, datos) => {
-      const doc = await crearUsuario(datos);
-      const { token, expiraEn } = await iniciarSesion(doc._id);
+    // Registro publico de compradores (rol CLIENTE). El comprador elige su
+    // escuela del catalogo; por compatibilidad con la app tambien se acepta
+    // una cafeteria, y se toma la escuela de esa cafeteria.
+    registro: async (_, { nombre, correo, password, escuelaId, cafeteriaId }) => {
+      let escuelaElegida = escuelaId;
+      if (!escuelaElegida && cafeteriaId) {
+        validarId(cafeteriaId, "cafeteria");
+        const cafeteria = await CafeteriaModel.findById(cafeteriaId);
+        if (!cafeteria || !cafeteria.activa) {
+          throw datoInvalido("La cafeteria indicada no existe o esta inactiva.");
+        }
+        escuelaElegida = cafeteria.escuelaId;
+      }
+      if (!escuelaElegida) {
+        throw datoInvalido("Debes elegir tu escuela.");
+      }
+      validarId(escuelaElegida, "escuela");
+      const escuela = await EscuelaModel.findById(escuelaElegida);
+      if (!escuela || !escuela.activa) {
+        throw datoInvalido("La escuela indicada no existe o esta suspendida.");
+      }
+
+      const doc = await crearCuenta(
+        { nombre, correo, password },
+        { rol: ROLES.CLIENTE, escuelaId: escuela._id }
+      );
+      await sincronizarSinFallar(`el comprador ${doc.correo}`, () => sincronizarUsuario(doc));
+      const { token, expiraEn } = await iniciarSesion(doc);
       return { token, expiraEn, usuario: mapUsuario(doc) };
     },
 
@@ -408,7 +640,8 @@ export const resolvers = {
     },
 
     // ---- Catalogos ----
-    registrarMoneda: async (_, { codigo, nombre, simbolo, decimales }) => {
+    registrarMoneda: async (_, { codigo, nombre, simbolo, decimales }, contexto) => {
+      await autorizar(contexto, "PLATAFORMA_ADMINISTRAR");
       try {
         const doc = await new MonedaModel({ codigo, nombre, simbolo, decimales }).save();
         await invalidarCache(clavesCache.monedas());
@@ -418,58 +651,35 @@ export const resolvers = {
       }
     },
 
-    registrarEscuela: async (_, { clave, nombre }) => {
-      try {
-        const doc = await new EscuelaModel({ clave, nombre }).save();
-        return mapEscuela(doc);
-      } catch (error) {
-        return manejarDuplicado(error, `Ya existe una escuela con la clave "${normalizarClave(clave)}".`);
-      }
-    },
-
-    registrarCafeteria: async (_, { nombre, escuelaId }) => {
-      const escuela = await EscuelaModel.findById(escuelaId);
-      if (!escuela) {
-        throw new Error("La escuela indicada no existe.");
-      }
-      if (!escuela.activa) {
-        throw new Error("La escuela indicada esta inactiva.");
-      }
-
-      try {
-        const doc = await new CafeteriaModel({ nombre, escuelaId }).save();
-        return mapCafeteria(doc);
-      } catch (error) {
-        return manejarDuplicado(error, `La escuela "${escuela.clave}" ya tiene una cafeteria llamada "${nombre}".`);
-      }
-    },
-
-    registrarUsuario: async (_, datos) => mapUsuario(await crearUsuario(datos)),
-
     // ---- Productos e inventario ----
     registrarProducto: async (_, {
       nombre, precio, disponible, inventario, cafeteriaId,
-      descripcion, categoria, imagenUrl, destacado, etiqueta
-    }) => {
+      descripcion, categoria, imagenUrl, destacado, etiqueta, tiempoPreparacionMin
+    }, contexto) => {
+      validarId(cafeteriaId, "cafeteria");
+      // Solo quien vende en esa cafeteria (o su jefe) puede agregar al menu
+      await autorizar(contexto, "PRODUCTO_GESTIONAR", { cafeteriaId });
       const cafeteria = await CafeteriaModel.findById(cafeteriaId);
       if (!cafeteria) {
         throw new Error("La cafeteria indicada no existe.");
       }
 
       // El precio debe estar en una moneda del catalogo y respetar sus decimales
-      const moneda = await obtenerMonedaDominio(precio.moneda);
-      moneda.validarMonto(precio.monto);
+      const precioFinal = await precioValidado(precio);
 
       // Validaciones de dominio antes de persistir
       const productoDominio = new Producto(
         null,
         nombre,
-        { monto: precio.monto, moneda: moneda.codigo },
+        precioFinal,
         disponible ?? true,
-        new Inventario(inventario.stock, inventario.puntoReorden, inventario.cantidadReposicion)
+        new Inventario(inventario.stock, inventario.puntoReorden, inventario.cantidadReposicion),
+        tiempoPreparacionMin ?? 5
       );
+      productoDominio.validarNombre();
       productoDominio.validarPrecioPositivo();
       productoDominio.validarInventario();
+      productoDominio.validarTiempoPreparacion();
 
       const doc = await new ProductoModel({
         nombre,
@@ -485,20 +695,79 @@ export const resolvers = {
         imagenUrl,
         destacado,
         etiqueta,
+        tiempoPreparacionMin: productoDominio.tiempoPreparacionMin,
         cafeteriaId
-      }).save();
+      }).save().catch(error => { throw validacionMongoose(error); });
 
       await invalidarProductos(cafeteriaId);
       return mapProducto(doc);
     },
 
+    // El vendedor edita un platillo de su menu. Solo cambia los campos enviados.
+    actualizarProducto: async (_, { productoId, cambios }, contexto) => {
+      validarId(productoId, "producto");
+      const producto = await ProductoModel.findById(productoId);
+      if (!producto) {
+        throw datoInvalido("El producto no existe.");
+      }
+      await autorizar(contexto, "PRODUCTO_GESTIONAR", { cafeteriaId: producto.cafeteriaId });
+
+      const campos = ["nombre", "descripcion", "categoria", "imagenUrl", "destacado",
+        "etiqueta", "disponible", "tiempoPreparacionMin"];
+      for (const campo of campos) {
+        if (cambios[campo] !== undefined && cambios[campo] !== null) {
+          producto[campo] = cambios[campo];
+        }
+      }
+      if (cambios.precio) {
+        producto.precio = await precioValidado(cambios.precio);
+      }
+
+      // Las mismas reglas de dominio que al registrar
+      const dominio = new Producto(
+        producto._id,
+        producto.nombre,
+        producto.precio,
+        producto.disponible,
+        new Inventario(
+          producto.inventario.stock,
+          producto.inventario.puntoReorden,
+          producto.inventario.cantidadReposicion
+        ),
+        producto.tiempoPreparacionMin
+      );
+      dominio.validarNombre();
+      dominio.validarPrecioPositivo();
+      dominio.validarTiempoPreparacion();
+
+      const guardado = await producto.save().catch(error => { throw validacionMongoose(error); });
+      await invalidarProductos(guardado.cafeteriaId, [productoId]);
+      return mapProducto(guardado);
+    },
+
+    // Atajo para "se acabo" / "ya hay": pausa o reactiva un platillo sin borrarlo
+    cambiarDisponibilidadProducto: async (_, { productoId, disponible }, contexto) => {
+      validarId(productoId, "producto");
+      const producto = await ProductoModel.findById(productoId);
+      if (!producto) {
+        throw datoInvalido("El producto no existe.");
+      }
+      await autorizar(contexto, "PRODUCTO_GESTIONAR", { cafeteriaId: producto.cafeteriaId });
+      producto.disponible = disponible;
+      const guardado = await producto.save();
+      await invalidarProductos(guardado.cafeteriaId, [productoId]);
+      return mapProducto(guardado);
+    },
+
     // Restock: suma unidades al stock. Sin cantidad, usa la cantidad de
     // reposicion configurada en el producto.
-    reponerInventario: async (_, { productoId, cantidad }) => {
+    reponerInventario: async (_, { productoId, cantidad }, contexto) => {
+      validarId(productoId, "producto");
       const producto = await ProductoModel.findById(productoId);
       if (!producto) {
         throw new Error("El producto no existe.");
       }
+      await autorizar(contexto, "INVENTARIO_REPONER", { cafeteriaId: producto.cafeteriaId });
 
       const unidades = cantidad ?? producto.inventario.cantidadReposicion;
       if (unidades <= 0) {
@@ -516,14 +785,17 @@ export const resolvers = {
     },
 
     // ---- Pedidos ----
-    crearPedido: async (_, { usuarioId, cafeteriaId, items }) => {
-      const usuario = await UsuarioModel.findById(usuarioId);
-      if (!usuario) {
-        throw new Error("El usuario no existe.");
+    // El pedido siempre es del usuario de la sesion. Regla multi-tenant: solo
+    // se puede pedir en cafeterias de la escuela a la que pertenece el usuario.
+    crearPedido: async (_, { usuarioId: usuarioIdEnviado, cafeteriaId, items, horaRecogida, notas }, contexto) => {
+      validarId(cafeteriaId, "cafeteria");
+      const { usuarioId } = await autorizar(contexto, "PEDIDO_CREAR", { cafeteriaId });
+      if (usuarioIdEnviado && String(usuarioIdEnviado) !== String(usuarioId)) {
+        throw prohibido("No puedes hacer pedidos a nombre de otro usuario.");
       }
-      // Regla multi-tenant: el usuario debe pertenecer a la cafeteria del pedido
-      if (String(usuario.cafeteriaId) !== String(cafeteriaId)) {
-        throw new Error("El usuario no pertenece a esta cafeteria.");
+      const cafeteria = await CafeteriaModel.findById(cafeteriaId);
+      if (!cafeteria?.activa) {
+        throw datoInvalido("La cafeteria no existe o esta cerrada.");
       }
 
       // Todo pedido nuevo nace en el estado marcado como inicial en el catalogo
@@ -542,15 +814,20 @@ export const resolvers = {
         cantidades.set(clave, (cantidades.get(clave) ?? 0) + cantidad);
       }
 
+      // Cuanto trabajo tiene ya la cocina (cola en Redis)
+      const cola = await estadoCola(cafeteriaId);
+
       // Crear el pedido y descontar el stock es UNA sola operacion: si algo
       // falla (sin stock, monedas mezcladas...), la transaccion se revierte y
       // el inventario queda como estaba. Requiere replica set (Atlas lo es).
       const session = await mongoose.startSession();
       let pedidoGuardado;
+      let estimacion;
 
       try {
         await session.withTransaction(async () => {
           const itemsPedido = [];
+          const tiemposItems = [];
 
           for (const [productoId, cantidad] of cantidades) {
             const producto = await ProductoModel.findById(productoId).session(session);
@@ -586,6 +863,7 @@ export const resolvers = {
             );
             item.validarCantidad();
             itemsPedido.push(item);
+            tiemposItems.push({ tiempoPreparacionMin: producto.tiempoPreparacionMin ?? 5, cantidad });
           }
 
           // Reglas de dominio: el pedido no puede ir vacio, se cobra en una sola
@@ -594,6 +872,20 @@ export const resolvers = {
           pedidoDominio.validarTieneItems();
           const moneda = await obtenerMonedaDominio(pedidoDominio.validarUnaSolaMoneda());
           const total = pedidoDominio.calcularTotal(moneda);
+
+          // Pickup: cuanto tarda y a que hora se recoge
+          estimacion = calcularTiempoEstimado(tiemposItems, cola.minutos, CAPACIDAD_PARALELA);
+          const ahora = new Date();
+          const masTemprana = new Date(ahora.getTime() + estimacion.totalMin * 60 * 1000);
+          let recogida = masTemprana;
+          if (horaRecogida) {
+            recogida = new Date(horaRecogida);
+            try {
+              validarHoraRecogida(recogida, masTemprana, ahora);
+            } catch (error) {
+              throw datoInvalido(error.message);
+            }
+          }
 
           const [doc] = await PedidoModel.create(
             [
@@ -607,7 +899,14 @@ export const resolvers = {
                   cantidad: i.cantidad
                 })),
                 total,
-                estado: estadoInicial.clave
+                estado: estadoInicial.clave,
+                escuelaId: cafeteria.escuelaId,
+                negocioId: cafeteria.negocioId,
+                historial: [{ estado: estadoInicial.clave, fecha: ahora, usuarioId }],
+                tiempoEstimadoMin: Math.round((recogida - ahora) / 60000),
+                horaRecogida: recogida,
+                codigoRecogida: String(randomInt(0, 10000)).padStart(4, "0"),
+                notas: notas ?? ""
               }
             ],
             { session }
@@ -627,26 +926,47 @@ export const resolvers = {
 
       // El pedido desconto stock: lo cacheado de esos productos ya no es valido
       await invalidarProductos(cafeteriaId, [...cantidades.keys()]);
+      // Entra a la cola de cocina con los minutos que le toma prepararse
+      await agregarACola(cafeteriaId, pedidoGuardado._id, estimacion.preparacionMin);
       return mapPedido(pedidoGuardado);
     },
 
-    actualizarEstadoPedido: async (_, { pedidoId, nuevoEstado }) => {
+    // El comprador cancela su pedido mientras la cafeteria aun no lo acepta
+    cancelarPedido: async (_, { pedidoId }, contexto) => {
+      validarId(pedidoId, "pedido");
+      const pedido = await PedidoModel.findById(pedidoId);
+      if (!pedido) {
+        throw datoInvalido("El pedido no existe.");
+      }
+      const { usuarioId } = await autorizar(contexto, "PEDIDO_CANCELAR_PROPIO", {
+        cafeteriaId: pedido.cafeteriaId
+      });
+      if (String(pedido.usuarioId) !== String(usuarioId)) {
+        throw prohibido("Solo puedes cancelar tus propios pedidos.");
+      }
+      if (pedido.estado !== "PENDIENTE") {
+        throw datoInvalido("Ya no puedes cancelarlo: la cafeteria ya acepto tu pedido.");
+      }
+      return mapPedido(await cambiarEstado(pedido, "CANCELADO", usuarioId));
+    },
+
+    // El vendedor avanza el pedido. Las transiciones validas salen del catalogo
+    // de estados. Para ENTREGADO hay que dar el codigo que muestra el comprador.
+    actualizarEstadoPedido: async (_, { pedidoId, nuevoEstado, codigoRecogida }, contexto) => {
+      validarId(pedidoId, "pedido");
       const doc = await PedidoModel.findById(pedidoId);
       if (!doc) {
         throw new Error("El pedido no existe.");
       }
+      const { usuarioId } = await autorizar(contexto, "PEDIDO_CAMBIAR_ESTADO", {
+        cafeteriaId: doc.cafeteriaId
+      });
 
-      // Ambos estados deben existir en el catalogo, y la transicion tambien
-      // se valida contra lo que dice el catalogo.
-      const estadoActual = await obtenerEstadoDominio(doc.estado);
-      const estadoNuevo = await obtenerEstadoDominio(nuevoEstado);
-      estadoActual.validarTransicion(estadoNuevo.clave);
-
-      doc.estado = estadoNuevo.clave;
-      const actualizado = await doc.save();
-      // El reporte de mas vendidos cuenta pedidos ENTREGADO: puede cambiar
-      await invalidarCache(clavesCache.productosMasVendidos(actualizado.cafeteriaId));
-      return mapPedido(actualizado);
+      const clave = normalizarClave(nuevoEstado);
+      if (clave === "ENTREGADO" && doc.codigoRecogida && codigoRecogida !== doc.codigoRecogida) {
+        throw datoInvalido("El codigo de recogida no coincide. Pideselo al comprador.");
+      }
+      return mapPedido(await cambiarEstado(doc, clave, usuarioId));
     }
   }
 };

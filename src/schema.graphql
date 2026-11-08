@@ -22,20 +22,50 @@ type EstadoPedido {
   transiciones: [String!]!
 }
 
+# ---------------------------------------------------------------
+# Multiempresa: escuela -> negocios -> cafeterias
+# ---------------------------------------------------------------
+
+# Cada escuela es un "tenant": sus datos no se mezclan con los de otra
 type Escuela {
   id: ID!
   # Identificador legible y unico, ademas del id (ej. "ULSA")
   clave: String!
   nombre: String!
+  ciudad: String!
   activa: Boolean!
+  # Cafeterias activas de la escuela (lo que ve el comprador)
+  cafeterias: [Cafeteria!]!
+}
+
+# La marca de un dueno (JEFE). Puede tener varias cafeterias, incluso en varias escuelas.
+type Negocio {
+  id: ID!
+  nombre: String!
+  duenoId: ID!
+  activo: Boolean!
+  escuelas: [Escuela!]!
+  cafeterias: [Cafeteria!]!
 }
 
 type Cafeteria {
   id: ID!
   nombre: String!
+  # Donde esta dentro del campus (ej. "Edificio B, planta baja")
+  ubicacion: String!
   escuelaId: ID!
   escuela: Escuela!
+  negocioId: ID!
+  negocio: Negocio!
   activa: Boolean!
+}
+
+enum Rol {
+  ADMIN_PLATAFORMA
+  ADMIN_ESCUELA
+  JEFE
+  VENDEDOR
+  CLIENTE
 }
 
 # ---------------------------------------------------------------
@@ -52,7 +82,14 @@ type Usuario {
   id: ID!
   nombre: String!
   correo: String!
-  cafeteriaId: ID!
+  rol: Rol!
+  # null solo para ADMIN_PLATAFORMA
+  escuelaId: ID
+  escuela: Escuela
+  # Solo JEFE y VENDEDOR
+  negocioId: ID
+  # Solo VENDEDOR: la cafeteria donde atiende
+  cafeteriaId: ID
 }
 
 type Inventario {
@@ -75,7 +112,18 @@ type Producto {
   imagenUrl: String
   destacado: Boolean!
   etiqueta: String!
+  # Minutos que tarda una orden; se usa para calcular la hora de recogida
+  tiempoPreparacionMin: Int!
+  # true si el vendedor lo pauso o ya no hay stock
+  agotado: Boolean!
   cafeteriaId: ID!
+  cafeteria: Cafeteria
+}
+
+# Una seccion del menu (ej. "Burritos") con sus productos; destacados primero
+type CategoriaMenu {
+  categoria: String!
+  productos: [Producto!]!
 }
 
 type ItemPedido {
@@ -83,6 +131,14 @@ type ItemPedido {
   nombreProducto: String!
   precioUnitario: Dinero!
   cantidad: Int!
+}
+
+type CambioEstado {
+  estado: String!
+  # Fecha ISO 8601
+  fecha: String!
+  # Quien hizo el cambio
+  usuarioId: ID
 }
 
 type Pedido {
@@ -93,6 +149,33 @@ type Pedido {
   total: Dinero!
   # Clave del catalogo de estados (ej. "PENDIENTE")
   estado: String!
+  notas: String!
+  # ---- Pickup ----
+  # Minutos desde que se hizo el pedido hasta la hora de recogida
+  tiempoEstimadoMin: Int
+  # Fecha ISO 8601
+  horaRecogida: String
+  # Solo lo ve el comprador; lo muestra al recoger
+  codigoRecogida: String
+  # 1 = el siguiente en la cocina; null si ya salio de la cola
+  posicionEnCola: Int
+  historial: [CambioEstado!]!
+  creadoEn: String
+}
+
+type EstimacionRecogida {
+  tiempoEstimadoMin: Int!
+  # Fecha ISO 8601
+  horaRecogida: String!
+  pedidosEnCola: Int!
+}
+
+type Notificacion {
+  pedidoId: ID!
+  estado: String!
+  mensaje: String!
+  # Fecha ISO 8601
+  fecha: String!
 }
 
 # Reporte generado por el pipeline de agregacion, siempre acotado a una cafeteria.
@@ -112,6 +195,40 @@ type SesionPayload {
   usuario: Usuario!
 }
 
+# Respuesta al registrar una escuela: el admin queda con sesion iniciada
+type RegistroEscuelaPayload {
+  escuela: Escuela!
+  # Se comparte con los duenos de las cafeterias para que se registren
+  codigoInvitacion: String!
+  sesion: SesionPayload!
+}
+
+type RegistroNegocioPayload {
+  negocio: Negocio!
+  sesion: SesionPayload!
+}
+
+input CuentaInput {
+  nombre: String!
+  correo: String!
+  password: String!
+}
+
+input RegistroEscuelaInput {
+  clave: String!
+  nombre: String!
+  ciudad: String!
+  # Cuenta del administrador de la escuela
+  admin: CuentaInput!
+}
+
+input RegistroNegocioInput {
+  # Codigo que da el admin de la escuela
+  codigoInvitacion: String!
+  nombreNegocio: String!
+  dueno: CuentaInput!
+}
+
 input DineroInput {
   monto: Float!
   moneda: String!
@@ -121,6 +238,20 @@ input InventarioInput {
   stock: Int!
   puntoReorden: Int!
   cantidadReposicion: Int!
+}
+
+# Campos que el vendedor puede cambiar de un platillo; los que no se envian no cambian
+input ProductoCambiosInput {
+  nombre: String
+  precio: DineroInput
+  descripcion: String
+  categoria: String
+  # URL https de Cloudinary
+  imagenUrl: String
+  destacado: Boolean
+  etiqueta: String
+  disponible: Boolean
+  tiempoPreparacionMin: Int
 }
 
 input ItemPedidoInput {
@@ -135,9 +266,12 @@ type Query {
   monedas: [Moneda!]!
   estadosPedido: [EstadoPedido!]!
 
-    # Texto de terminos y condiciones en formato markdown (publico, no requiere sesion)
+  # Texto de terminos y condiciones en formato markdown (publico, no requiere sesion)
   terminos: String!
 
+  # ---- Catalogo publico (lo que ve el comprador) ----
+  # Escuelas activas; busqueda opcional por nombre, clave o ciudad
+  catalogoEscuelas(busqueda: String): [Escuela!]!
   escuelas: [Escuela!]!
   escuela(id: ID!): Escuela
   escuelaPorClave(clave: String!): Escuela
@@ -146,14 +280,33 @@ type Query {
   cafeteria(id: ID!): Cafeteria
   cafeteriasPorEscuela(escuelaId: ID!): [Cafeteria!]!
 
+  # ---- Administracion ----
+  # ADMIN_ESCUELA: codigo para invitar a los duenos de cafeterias
+  codigoInvitacion(escuelaId: ID!): String!
+  # JEFE o VENDEDOR: el negocio al que pertenece la cuenta
+  miNegocio: Negocio
+
   productosPorCafeteria(cafeteriaId: ID!): [Producto!]!
+  # El mismo menu agrupado por categoria
+  menuPorCategoria(cafeteriaId: ID!): [CategoriaMenu!]!
+  # Otras cafeterias del mismo negocio y escuela donde si hay ese producto
+  dondeHay(productoId: ID!): [Producto!]!
   producto(id: ID!): Producto
   # Productos cuyo stock ya llego al punto de reorden
   productosPorReponer(cafeteriaId: ID!): [Producto!]!
 
+  # Protegidas: el pedido lo ve quien lo hizo o quien gestiona la cafeteria
   pedido(id: ID!): Pedido
+  misPedidos: [Pedido!]!
+  # Compatibilidad con la app: solo acepta el id del usuario de la sesion
   pedidosPorUsuario(usuarioId: ID!): [Pedido!]!
   pedidosPorCafeteria(cafeteriaId: ID!): [Pedido!]!
+  # VENDEDOR: pedidos activos de la cafeteria, por hora de recogida
+  colaCafeteria(cafeteriaId: ID!): [Pedido!]!
+  # Publica: tiempo y hora de recogida si se pide ahora
+  estimarRecogida(cafeteriaId: ID!, items: [ItemPedidoInput!]!): EstimacionRecogida!
+  # Avisos de cambios de estado de mis pedidos (mas recientes primero)
+  misNotificaciones(limite: Int = 20): [Notificacion!]!
 
   productosMasVendidos(cafeteriaId: ID!): [ProductoMasVendido!]!
 }
@@ -163,14 +316,34 @@ type Mutation {
   login(correo: String!, password: String!): SesionPayload!
   # Protegida: borra sesion:<jti> en Redis, el token queda revocado al instante
   logout: Boolean!
-  # Registro publico desde la app: crea el usuario y ya devuelve su sesion
-  # (mismo resultado que login, para no pedir la contrasena dos veces)
-  registro(nombre: String!, correo: String!, password: String!, cafeteriaId: ID!): SesionPayload!
+  # Registro publico de compradores (CLIENTE): crea la cuenta y ya devuelve su sesion.
+  # Se manda escuelaId (elegida del catalogo); cafeteriaId se acepta por compatibilidad.
+  registro(
+    nombre: String!
+    correo: String!
+    password: String!
+    escuelaId: ID
+    cafeteriaId: ID
+  ): SesionPayload!
 
+  # ---- Multiempresa (la escuela se registra primero) ----
+  # Publico: crea la escuela y su ADMIN_ESCUELA; devuelve el codigo de invitacion
+  registrarEscuela(input: RegistroEscuelaInput!): RegistroEscuelaPayload!
+  # ADMIN_ESCUELA: invalida el codigo anterior y genera otro
+  regenerarCodigoInvitacion(escuelaId: ID!): String!
+  # ADMIN_PLATAFORMA: suspende o reactiva una escuela
+  cambiarEstadoEscuela(escuelaId: ID!, activa: Boolean!): Escuela!
+  # Publico con codigo: crea el negocio y la cuenta JEFE de su dueno
+  registrarNegocio(input: RegistroNegocioInput!): RegistroNegocioPayload!
+  # JEFE: su negocio entra a otra escuela con el codigo de esa escuela
+  unirNegocioAEscuela(codigoInvitacion: String!): Negocio!
+  # JEFE: abre una cafeteria en una escuela donde ya esta su negocio
+  registrarCafeteria(escuelaId: ID!, nombre: String!, ubicacion: String): Cafeteria!
+  # JEFE: da de alta a un vendedor en una de sus cafeterias
+  registrarVendedor(cafeteriaId: ID!, cuenta: CuentaInput!): Usuario!
+
+  # ADMIN_PLATAFORMA
   registrarMoneda(codigo: String!, nombre: String!, simbolo: String!, decimales: Int = 2): Moneda!
-  registrarEscuela(clave: String!, nombre: String!): Escuela!
-  registrarCafeteria(nombre: String!, escuelaId: ID!): Cafeteria!
-  registrarUsuario(nombre: String!, correo: String!, password: String!, cafeteriaId: ID!): Usuario!
   registrarProducto(
     nombre: String!
     precio: DineroInput!
@@ -182,12 +355,27 @@ type Mutation {
     imagenUrl: String
     destacado: Boolean
     etiqueta: String
+    tiempoPreparacionMin: Int
   ): Producto!
+  # VENDEDOR o JEFE de la cafeteria: edita un platillo
+  actualizarProducto(productoId: ID!, cambios: ProductoCambiosInput!): Producto!
+  # VENDEDOR o JEFE: marca un platillo como agotado o disponible
+  cambiarDisponibilidadProducto(productoId: ID!, disponible: Boolean!): Producto!
 
   # Suma stock. Si no se indica cantidad, usa la cantidadReposicion del producto.
   reponerInventario(productoId: ID!, cantidad: Int): Producto!
 
-  # Descuenta el stock de cada producto dentro de una transaccion
-  crearPedido(usuarioId: ID!, cafeteriaId: ID!, items: [ItemPedidoInput!]!): Pedido!
-  actualizarEstadoPedido(pedidoId: ID!, nuevoEstado: String!): Pedido!
+  # Protegida: el pedido es del usuario de la sesion. Descuenta el stock en una transaccion.
+  # horaRecogida (ISO 8601) es opcional: sin ella se usa la hora estimada mas pronta.
+  crearPedido(
+    cafeteriaId: ID!
+    items: [ItemPedidoInput!]!
+    horaRecogida: String
+    notas: String
+    usuarioId: ID @deprecated(reason: "El pedido siempre es del usuario de la sesion.")
+  ): Pedido!
+  # VENDEDOR o JEFE. Para pasar a ENTREGADO se pide el codigo de recogida del comprador.
+  actualizarEstadoPedido(pedidoId: ID!, nuevoEstado: String!, codigoRecogida: String): Pedido!
+  # Comprador: cancela su pedido mientras siga PENDIENTE; se regresa el stock
+  cancelarPedido(pedidoId: ID!): Pedido!
 }

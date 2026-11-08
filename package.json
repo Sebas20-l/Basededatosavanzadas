@@ -7,7 +7,8 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
-    "seed": "node src/seed.js"
+    "seed": "node src/seed.js",
+    "grafo": "node src/sync-grafo.js"
   },
   "dependencies": {
     "@apollo/server": "^4.11.0",
@@ -16,6 +17,7 @@
     "graphql": "^16.9.0",
     "jsonwebtoken": "^9.0.2",
     "mongoose": "^8.6.0",
+    "neo4j-driver": "^5.28.3",
     "redis": "^4.7.0"
   }
 }
