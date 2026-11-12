@@ -1,5 +1,5 @@
 {
-  "name": "pide-y-recoge",
+  "name": "cafe_online",
   "version": "1.0.0",
   "description": "App para pedir comida en la cafeteria y recogerla sin hacer fila",
   "type": "module",
@@ -8,12 +8,14 @@
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
     "seed": "node src/seed.js",
-    "grafo": "node src/sync-grafo.js"
+    "grafo": "node src/sync-grafo.js",
+    "test": "node --test --test-force-exit test/*.test.js"
   },
   "dependencies": {
     "@apollo/server": "^4.11.0",
     "bcryptjs": "^2.4.3",
     "cassandra-driver": "^4.10.0",
+    "cloudinary": "^2.11.0",
     "dotenv": "^16.4.5",
     "graphql": "^16.9.0",
     "jsonwebtoken": "^9.0.2",
