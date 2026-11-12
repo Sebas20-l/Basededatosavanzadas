@@ -47,6 +47,7 @@ import {
   prohibido
 } from "../infrastructure/auth.js";
 import { autorizar, puede } from "../infrastructure/autorizacion.js";
+import { prepararFirmaSubida } from "../infrastructure/cloudinary.js";
 import { sincronizarUsuario, sincronizarSinFallar } from "../infrastructure/grafo.js";
 import { ROLES } from "../domain/roles.js";
 import {
@@ -1028,6 +1029,32 @@ export const resolvers = {
         throw datoInvalido("El codigo de recogida no coincide. Pideselo al comprador.");
       }
       return mapPedido(await cambiarEstado(doc, clave, usuarioId));
+    },
+
+    // Genera parametros y firma de Cloudinary para autorizar subidas directas desde clientes.
+    // - PERFIL: no requiere cafeteriaId; sube a perfiles/<usuarioId>.
+    // - PRODUCTO: requiere cafeteriaId y permiso PRODUCTO_GESTIONAR en esa cafeteria.
+    solicitarFirmaSubida: async (_, { tipo, cafeteriaId }, contexto) => {
+      const auth = requerirSesion(contexto);
+
+      if (tipo === "PRODUCTO") {
+        if (!cafeteriaId) {
+          throw datoInvalido("Debes indicar la cafeteria para subir la imagen de un producto.");
+        }
+        validarId(cafeteriaId, "cafeteria");
+        await autorizar(contexto, "PRODUCTO_GESTIONAR", { cafeteriaId });
+        const cafeteria = await CafeteriaModel.findById(cafeteriaId);
+        if (!cafeteria) {
+          throw datoInvalido("La cafeteria indicada no existe.");
+        }
+      }
+
+      // Valida credenciales primero y luego consume la cuota atomica en Redis.
+      return prepararFirmaSubida({
+        tipo,
+        cafeteriaId,
+        usuarioId: auth.usuarioId
+      });
     }
   }
 };

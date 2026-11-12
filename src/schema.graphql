@@ -302,6 +302,21 @@ input ItemPedidoInput {
   cantidad: Int!
 }
 
+enum TipoRecursoImagen {
+  PRODUCTO
+  PERFIL
+}
+
+# Parametros de autorizacion de subida generados por el backend con el API Secret
+type FirmaCloudinary {
+  signature: String!
+  timestamp: Int!
+  apiKey: String!
+  cloudName: String!
+  folder: String!
+  uploadPreset: String!
+}
+
 type Query {
   # Protegida: requiere Authorization: Bearer <token> con sesion activa en Redis
   me: Usuario!
@@ -436,4 +451,9 @@ type Mutation {
   actualizarEstadoPedido(pedidoId: ID!, nuevoEstado: String!, codigoRecogida: String): Pedido!
   # Comprador: cancela su pedido mientras siga PENDIENTE; se regresa el stock
   cancelarPedido(pedidoId: ID!): Pedido!
+
+  # Protegida: genera una firma de Cloudinary para autorizar subidas directas desde el cliente.
+  # - tipo PERFIL: carpeta perfiles/<usuarioId> (cualquier usuario con sesion activa).
+  # - tipo PRODUCTO: carpeta productos/cafeteria_<cafeteriaId> (requiere permiso PRODUCTO_GESTIONAR en esa cafeteria).
+  solicitarFirmaSubida(tipo: TipoRecursoImagen!, cafeteriaId: ID): FirmaCloudinary!
 }
