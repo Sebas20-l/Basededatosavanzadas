@@ -90,6 +90,8 @@ type Usuario {
   negocioId: ID
   # Solo VENDEDOR: la cafeteria donde atiende
   cafeteriaId: ID
+  # URL de Cloudinary de la foto de perfil; null si aun no tiene
+  fotoPerfilUrl: String
 }
 
 type Inventario {
@@ -456,4 +458,8 @@ type Mutation {
   # - tipo PERFIL: carpeta perfiles/<usuarioId> (cualquier usuario con sesion activa).
   # - tipo PRODUCTO: carpeta productos/cafeteria_<cafeteriaId> (requiere permiso PRODUCTO_GESTIONAR en esa cafeteria).
   solicitarFirmaSubida(tipo: TipoRecursoImagen!, cafeteriaId: ID): FirmaCloudinary!
+
+  # Protegida: guarda en el usuario de la sesion la URL https de su foto de perfil.
+  # Debe ser una URL de Cloudinary ya subida (ej. la devuelta por la subida firmada).
+  actualizarFotoPerfil(fotoUrl: String!): Usuario!
 }

@@ -75,7 +75,8 @@ export function mapUsuario(doc) {
     rol: doc.rol,
     escuelaId: doc.escuelaId ?? null,
     negocioId: doc.negocioId ?? null,
-    cafeteriaId: doc.cafeteriaId ?? null
+    cafeteriaId: doc.cafeteriaId ?? null,
+    fotoPerfilUrl: doc.fotoPerfilUrl || null
   };
 }
 

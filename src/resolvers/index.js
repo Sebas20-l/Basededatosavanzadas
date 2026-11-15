@@ -1055,6 +1055,24 @@ export const resolvers = {
         cafeteriaId,
         usuarioId: auth.usuarioId
       });
+    },
+
+    // Guarda la URL de Cloudinary de la foto de perfil en el usuario de la sesion.
+    // El cliente la sube directo a Cloudinary y aqui solo se persiste la direccion.
+    actualizarFotoPerfil: async (_, { fotoUrl }, contexto) => {
+      const { usuarioId } = requerirSesion(contexto);
+      const url = String(fotoUrl ?? "").trim();
+      if (!/^https:\/\//.test(url)) {
+        throw datoInvalido("La foto de perfil debe ser una URL https.");
+      }
+
+      const doc = await UsuarioModel.findById(usuarioId);
+      if (!doc) {
+        throw noAutorizado("El usuario de la sesion ya no existe.");
+      }
+      doc.fotoPerfilUrl = url;
+      await doc.save();
+      return mapUsuario(doc);
     }
   }
 };

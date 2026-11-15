@@ -151,7 +151,17 @@ const UsuarioSchema = new mongoose.Schema({
   // Solo JEFE y VENDEDOR
   negocioId: { type: mongoose.Schema.Types.ObjectId, ref: "Negocio" },
   // Solo VENDEDOR: la cafeteria donde atiende
-  cafeteriaId: { type: mongoose.Schema.Types.ObjectId, ref: "Cafeteria" }
+  cafeteriaId: { type: mongoose.Schema.Types.ObjectId, ref: "Cafeteria" },
+  // URL de Cloudinary de la foto de perfil (vacia = sin foto)
+  fotoPerfilUrl: {
+    type: String,
+    default: "",
+    trim: true,
+    validate: {
+      validator: v => !v || /^https:\/\//.test(v),
+      message: "La foto de perfil debe ser una URL https."
+    }
+  }
 }, { timestamps: true });
 
 UsuarioSchema.index({ escuelaId: 1, rol: 1 });
