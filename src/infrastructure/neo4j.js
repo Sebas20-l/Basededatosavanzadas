@@ -15,6 +15,9 @@ export const neo4jDriver = neo4j.driver(uri, neo4j.auth.basic(usuario, password 
   disableLosslessIntegers: true
 });
 
+// Para los servicios que abren sus propias sesiones (ver src/services/rbac.service.js)
+export const getDriver = () => neo4jDriver;
+
 export async function conectarNeo4j() {
   if (!password) {
     console.error("Falta NEO4J_PASSWORD en .env (la misma de NEO4J_AUTH en docker-compose.yml).");
