@@ -9,10 +9,12 @@
     "dev": "node --watch src/index.js",
     "seed": "node src/seed.js",
     "grafo": "node src/sync-grafo.js",
-    "test": "node --test --test-force-exit test/*.test.js"
+    "test": "node --test --test-force-exit test/*.test.js",
+    "worker": "node src/worker-auditoria.js"
   },
   "dependencies": {
     "@apollo/server": "^4.11.0",
+    "amqplib": "^0.10.4",
     "bcryptjs": "^2.4.3",
     "cassandra-driver": "^4.10.0",
     "cloudinary": "^2.11.0",

@@ -49,7 +49,7 @@ export async function iniciarSesion(usuario) {
   await redisClient.set(claveSesion(jti), String(usuarioId), { EX: SESION_TTL_SEGUNDOS });
   console.log(`[SESION] SET ${claveSesion(jti)} ${usuarioId} EX ${SESION_TTL_SEGUNDOS}`);
 
-  return { token, expiraEn: SESION_TTL_SEGUNDOS };
+  return { token, expiraEn: SESION_TTL_SEGUNDOS, jti };
 }
 
 export async function cerrarSesion(jti) {
@@ -62,10 +62,20 @@ export async function cerrarSesion(jti) {
 // Sin encabezado Authorization la peticion sigue como anonima (login, catalogos...).
 // Con encabezado, el token DEBE ser valido y su sesion DEBE seguir en Redis;
 // si no, se rechaza toda la peticion con 401.
+// IP de quien hace la peticion (para la auditoria). Detras de un proxy como
+// Render llega en x-forwarded-for; en local, en el socket.
+function ipDe(req) {
+  const reenviada = String(req.headers["x-forwarded-for"] || "").split(",")[0].trim();
+  const ip = reenviada || req.socket?.remoteAddress || "127.0.0.1";
+  const limpia = ip.replace(/^::ffff:/, "");
+  return limpia === "::1" ? "127.0.0.1" : limpia;
+}
+
 export async function construirContexto({ req }) {
+  const ip = ipDe(req);
   const encabezado = req.headers.authorization || "";
   if (!encabezado) {
-    return { auth: null };
+    return { auth: null, ip };
   }
 
   const [esquema, token] = encabezado.split(" ");
@@ -90,6 +100,7 @@ export async function construirContexto({ req }) {
   }
 
   return {
+    ip,
     auth: {
       usuarioId: payload.sub,
       jti: payload.jti,

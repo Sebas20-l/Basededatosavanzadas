@@ -9,7 +9,8 @@
 import { readFileSync } from "fs";
 import { fileURLToPath } from "url";
 import path from "path";
-import { escrituraNeo4j } from "./neo4j.js";
+import { escrituraNeo4j, lecturaNeo4j } from "./neo4j.js";
+import { emitirEventoSeguridad } from "./rabbitmq.js";
 import { redisClient } from "./redis.js";
 import {
   EscuelaModel,
@@ -140,8 +141,26 @@ export async function sincronizarUsuario(usuario) {
     ]);
   }
 
+  // Rol que tenia en el grafo antes de este cambio (null si es nuevo)
+  const previos = await lecturaNeo4j(
+    "OPTIONAL MATCH (:User {id: $id})-[:HAS_ROLE]->(r:Role) RETURN r.name AS rol",
+    parametros
+  );
+  const rolAnterior = previos[0]?.get("rol") ?? null;
+
   await escrituraNeo4j(consultas);
   await invalidarPermisosUsuario(parametros.id);
+
+  // 4. Cambio de privilegios: solo si la relacion HAS_ROLE realmente cambio
+  if (parametros.rol && rolAnterior !== parametros.rol) {
+    emitirEventoSeguridad({
+      tipo_evento: "ROLE_CHANGED",
+      usuario_id: parametros.id,
+      exito: true,
+      motivo: "Actualización en grafo RBAC",
+      metadata: { nuevoRol: parametros.rol, rolAnterior }
+    });
+  }
 }
 
 // Sentencias de un script Cypher (rbac.cypher o init-rbac.cql), sin las

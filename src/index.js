@@ -8,6 +8,7 @@ import { conectarBaseDatos } from "./infrastructure/db.js";
 import { conectarRedis } from "./infrastructure/redis.js";
 import { conectarNeo4j } from "./infrastructure/neo4j.js";
 import { conectarCassandra } from "./infrastructure/cassandra.js";
+import { initRabbitMQ } from "./infrastructure/rabbitmq.js";
 import { construirContexto } from "./infrastructure/auth.js";
 import { resolvers } from "./resolvers/index.js";
 
@@ -18,6 +19,8 @@ await conectarBaseDatos();
 await conectarRedis();
 await conectarNeo4j();
 await conectarCassandra();
+// Auditoria asincrona: si RabbitMQ no esta, la API arranca en modo degradado
+await initRabbitMQ();
 
 const server = new ApolloServer({ typeDefs, resolvers });
 
