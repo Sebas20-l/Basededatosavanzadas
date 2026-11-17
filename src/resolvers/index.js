@@ -49,6 +49,7 @@ import {
 import { autorizar, puede } from "../infrastructure/autorizacion.js";
 import { prepararFirmaSubida } from "../infrastructure/cloudinary.js";
 import { sincronizarUsuario, sincronizarSinFallar } from "../infrastructure/grafo.js";
+import { resolversRbac } from "./rbac.js";
 import { ROLES } from "../domain/roles.js";
 import {
   datoInvalido,
@@ -413,6 +414,7 @@ export const resolvers = {
   Query: {
     ...resolversMultiempresa.Query,
     ...resolversReportes.Query,
+    ...resolversRbac.Query,
 
     // ---- Sesion ----
     terminos: () =>

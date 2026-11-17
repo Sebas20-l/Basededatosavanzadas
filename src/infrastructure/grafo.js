@@ -21,6 +21,8 @@ import { ROLES } from "../domain/roles.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ARCHIVO_RBAC = path.join(__dirname, "../../neo4j/rbac.cypher");
+// Rutas y menu dinamico (etiquetas en ingles: User, Role, Route, MenuNode)
+const ARCHIVO_RBAC_RUTAS = path.join(__dirname, "../../neo4j/init-rbac.cql");
 
 const id = valor => (valor == null ? null : String(valor));
 
@@ -86,16 +88,22 @@ export async function sincronizarUsuario(usuario) {
 
   const consultas = [
     [
+      // El mismo nodo es :Usuario (permisos por accion) y :User (rutas y menu)
       `MERGE (u:Usuario {id: $id})
-       SET u.correo = $correo, u.nombre = $nombre
+       SET u:User, u.correo = $correo, u.nombre = $nombre
        WITH u
-       OPTIONAL MATCH (u)-[r:TIENE_ROL|MIEMBRO_DE|ADMINISTRA|DUENO_DE|TRABAJA_EN]->()
+       OPTIONAL MATCH (u)-[r:TIENE_ROL|HAS_ROLE|MIEMBRO_DE|ADMINISTRA|DUENO_DE|TRABAJA_EN]->()
        DELETE r`,
       parametros
     ],
     [
       `MATCH (u:Usuario {id: $id}), (rol:Rol {nombre: $rol})
        MERGE (u)-[:TIENE_ROL]->(rol)`,
+      parametros
+    ],
+    [
+      `MATCH (u:User {id: $id}), (role:Role {name: $rol})
+       MERGE (u)-[:HAS_ROLE]->(role)`,
       parametros
     ]
   ];
@@ -136,10 +144,10 @@ export async function sincronizarUsuario(usuario) {
   await invalidarPermisosUsuario(parametros.id);
 }
 
-// Sentencias del modelo RBAC (roles, permisos, restricciones) de rbac.cypher,
-// sin las consultas de verificacion del final ni las lineas de comentario.
-function sentenciasRbac() {
-  const contenido = readFileSync(ARCHIVO_RBAC, "utf8").split("CONSULTAS DE VERIFICACION")[0];
+// Sentencias de un script Cypher (rbac.cypher o init-rbac.cql), sin las
+// consultas de verificacion del final ni las lineas de comentario.
+function sentenciasDe(archivo) {
+  const contenido = readFileSync(archivo, "utf8").split("CONSULTAS DE VERIFICACION")[0];
   return contenido
     .split(/;\s*(?:\r?\n|$)/)
     .map(bloque => bloque.split(/\r?\n/).filter(l => !l.trim().startsWith("//")).join("\n").trim())
@@ -150,8 +158,10 @@ function sentenciasRbac() {
 export async function reconstruirGrafo() {
   // Las restricciones (CREATE CONSTRAINT) no pueden ir en la misma transaccion
   // que escrituras de datos: se ejecuta cada sentencia por separado.
-  for (const sentencia of sentenciasRbac()) {
-    await escrituraNeo4j([[sentencia]]);
+  for (const archivo of [ARCHIVO_RBAC, ARCHIVO_RBAC_RUTAS]) {
+    for (const sentencia of sentenciasDe(archivo)) {
+      await escrituraNeo4j([[sentencia]]);
+    }
   }
 
   const [escuelas, negocios, cafeterias, usuarios] = await Promise.all([

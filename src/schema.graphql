@@ -317,9 +317,28 @@ type FirmaCloudinary {
   uploadPreset: String!
 }
 
+# Boton del menu dinamico. Sale del grafo de Neo4j segun los roles del usuario
+# (ver neo4j/init-rbac.cql). path es null si el boton solo agrupa submenus.
+type MenuItem {
+  id: ID!
+  title: String!
+  order: Int!
+  path: String
+  children: [MenuItem!]!
+}
+
 type Query {
   # Protegida: requiere Authorization: Bearer <token> con sesion activa en Redis
   me: Usuario!
+
+  # ---- RBAC por rutas y menu dinamico (Neo4j) ----
+  # Sin sesion responden como el rol INVITADO.
+  # Botones y submenus que el usuario tiene permitido ver
+  miMenu: [MenuItem!]!
+  # ¿Puede entrar a esta ruta? (por su rol o los que hereda)
+  puedoAcceder(path: String!): Boolean!
+  # Todas las rutas que puede abrir
+  misRutas: [String!]!
 
   monedas: [Moneda!]!
   estadosPedido: [EstadoPedido!]!
