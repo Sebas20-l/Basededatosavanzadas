@@ -37,7 +37,7 @@ import {
   eventosDeCafeteria,
   ventasPorHora,
   diaYHora
-} from "../infrastructure/cassandra.js";
+} from "../infrastructure/scylla.js";
 import { obtenerConCache, invalidarCache, clavesCache } from "../infrastructure/cache.js";
 import {
   iniciarSesion,
@@ -242,7 +242,7 @@ async function cambiarEstado(pedido, claveNueva, usuarioId) {
   if (ESTADOS_FUERA_DE_COLA.includes(guardado.estado)) {
     await quitarDeCola(guardado.cafeteriaId, guardado._id);
   }
-  // Bitacora en Cassandra; al entregar se suma la venta a la hora actual
+  // Bitacora en ScyllaDB; al entregar se suma la venta a la hora actual
   await registrarEvento({
     pedido: guardado,
     estado: guardado.estado,
@@ -598,7 +598,7 @@ export const resolvers = {
       };
     },
 
-    // ---- Reportes desde Cassandra ----
+    // ---- Reportes desde ScyllaDB ----
     // Bitacora completa de un pedido (quien y cuando cambio cada estado)
     eventosPedido: async (_, { pedidoId }, contexto) => {
       validarId(pedidoId, "pedido");
@@ -978,7 +978,7 @@ export const resolvers = {
       await invalidarProductos(cafeteriaId, [...cantidades.keys()]);
       // Entra a la cola de cocina con los minutos que le toma prepararse
       await agregarACola(cafeteriaId, pedidoGuardado._id, estimacion.preparacionMin);
-      // Bitacora y demanda por hora en Cassandra
+      // Bitacora y demanda por hora en ScyllaDB
       await registrarEvento({
         pedido: pedidoGuardado,
         estado: pedidoGuardado.estado,

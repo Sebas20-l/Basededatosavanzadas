@@ -7,7 +7,7 @@ import path from "path";
 import { conectarBaseDatos } from "./infrastructure/db.js";
 import { conectarRedis } from "./infrastructure/redis.js";
 import { conectarNeo4j } from "./infrastructure/neo4j.js";
-import { conectarCassandra } from "./infrastructure/cassandra.js";
+import { conectarScylla } from "./infrastructure/scylla.js";
 import { initRabbitMQ } from "./infrastructure/rabbitmq.js";
 import { construirContexto } from "./infrastructure/auth.js";
 import { resolvers } from "./resolvers/index.js";
@@ -18,7 +18,7 @@ const typeDefs = readFileSync(path.join(__dirname, "schema.graphql"), "utf8");
 await conectarBaseDatos();
 await conectarRedis();
 await conectarNeo4j();
-await conectarCassandra();
+await conectarScylla();
 // Auditoria asincrona: si RabbitMQ no esta, la API arranca en modo degradado
 await initRabbitMQ();
 

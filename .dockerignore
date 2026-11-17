@@ -1,0 +1,7 @@
+# node_modules de Windows no sirve en Linux; el contenedor instala el suyo
+node_modules
+.env
+.git
+*.log
+*.zip
+docs

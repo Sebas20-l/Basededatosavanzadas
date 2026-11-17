@@ -194,7 +194,7 @@ type TiemposCafeteria {
   promedioTotalMin: Float
 }
 
-# Un cambio de estado guardado en Cassandra
+# Un cambio de estado guardado en ScyllaDB
 type EventoPedido {
   pedidoId: ID!
   estado: String!
@@ -205,7 +205,7 @@ type EventoPedido {
   total: Float
 }
 
-# Metricas de una hora del dia (contadores de Cassandra)
+# Metricas de una hora del dia (contadores de ScyllaDB)
 type VentaPorHora {
   # 0 a 23, hora local de la escuela
   hora: Int!
@@ -392,7 +392,7 @@ type Query {
   # JEFE: tiempo promedio de preparacion y de entrega
   tiemposCafeteria(cafeteriaId: ID!): TiemposCafeteria!
 
-  # ---- Reportes desde Cassandra (dia con formato AAAA-MM-DD; por defecto hoy) ----
+  # ---- Reportes desde ScyllaDB (dia con formato AAAA-MM-DD; por defecto hoy) ----
   # Bitacora de un pedido: lo ve quien lo hizo o quien gestiona la cafeteria
   eventosPedido(pedidoId: ID!): [EventoPedido!]!
   # VENDEDOR o JEFE: todo lo que paso en la cafeteria ese dia, lo mas reciente primero
