@@ -24,6 +24,7 @@ import {
   sincronizarSinFallar
 } from "../infrastructure/grafo.js";
 import { ROLES } from "../domain/roles.js";
+import { authService } from "../services/auth.service.js";
 import {
   datoInvalido,
   manejarDuplicado,
@@ -130,7 +131,7 @@ export const resolversMultiempresa = {
   Mutation: {
     // Publico: cualquier escuela de cualquier lugar puede darse de alta.
     // Crea la escuela y su administrador en una sola transaccion.
-    registrarEscuela: async (_, { input }) => {
+    registrarEscuela: async (_, { input }, contexto) => {
       const { clave, nombre, ciudad, admin } = input;
       const escuelaId = new mongoose.Types.ObjectId();
 
@@ -155,6 +156,7 @@ export const resolversMultiempresa = {
         return crearCuenta(admin, { rol: ROLES.ADMIN_ESCUELA, escuelaId }, session);
       });
 
+      authService.auditarRegistro(usuarioAdmin, contexto);
       const escuela = await EscuelaModel.findById(escuelaId);
       await sincronizarSinFallar(`la escuela ${escuela.clave}`, async () => {
         await sincronizarEscuela(escuela);
@@ -188,7 +190,7 @@ export const resolversMultiempresa = {
     },
 
     // Publico con codigo: el dueno crea su negocio y su cuenta JEFE
-    registrarNegocio: async (_, { input }) => {
+    registrarNegocio: async (_, { input }, contexto) => {
       const { codigoInvitacion, nombreNegocio, dueno } = input;
       if (!nombreNegocio?.trim()) {
         throw datoInvalido("El negocio necesita un nombre.");
@@ -210,6 +212,7 @@ export const resolversMultiempresa = {
         );
       });
 
+      authService.auditarRegistro(usuarioJefe, contexto);
       const negocio = await NegocioModel.findById(negocioId);
       await sincronizarSinFallar(`el negocio ${negocio.nombre}`, async () => {
         await sincronizarNegocio(negocio);
@@ -289,6 +292,7 @@ export const resolversMultiempresa = {
         negocioId: cafeteria.negocioId,
         cafeteriaId: cafeteria._id
       });
+      authService.auditarRegistro(doc, contexto);
       await sincronizarSinFallar(`el vendedor ${doc.correo}`, () => sincronizarUsuario(doc));
       return mapUsuario(doc);
     }

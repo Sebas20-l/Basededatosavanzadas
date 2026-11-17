@@ -84,11 +84,27 @@ services:
     networks:
       - bda-network
 
+  # -------------------------------------------------------------
+  # RabbitMQ: cola de eventos de seguridad (auditoria asincrona)
+  # -------------------------------------------------------------
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    container_name: rabbitmq          # la prueba usa: docker stop rabbitmq
+    restart: unless-stopped
+    ports:
+      - "5672:5672"     # Protocolo AMQP (amqplib)
+      - "15672:15672"   # RabbitMQ UI (guest / guest)
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq   # la cola durable sobrevive reinicios
+    networks:
+      - bda-network
+
 networks:
   bda-network:
     driver: bridge
 
 volumes:
+  rabbitmq_data:
   mongodb_data:
   redis_data:
   neo4j_data:

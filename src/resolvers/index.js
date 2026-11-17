@@ -50,6 +50,7 @@ import { autorizar, puede } from "../infrastructure/autorizacion.js";
 import { prepararFirmaSubida } from "../infrastructure/cloudinary.js";
 import { sincronizarUsuario, sincronizarSinFallar } from "../infrastructure/grafo.js";
 import { resolversRbac } from "./rbac.js";
+import { authService } from "../services/auth.service.js";
 import { ROLES } from "../domain/roles.js";
 import {
   datoInvalido,
@@ -645,24 +646,16 @@ export const resolvers = {
     ...resolversMultiempresa.Mutation,
 
     // ---- Sesion ----
-    login: async (_, { correo, password }) => {
-      // Se aplica la misma normalizacion usada al registrar la cuenta.
-      const correoNormalizado = correo.trim().toLowerCase();
-      const doc = await UsuarioModel.findOne({ correo: correoNormalizado })
-        .select("+passwordHash");
-      // No revela si fallo el correo o la contrasena; compara contra el hash guardado.
-      const valido = doc?.passwordHash && (await bcrypt.compare(password, doc.passwordHash));
-      if (!valido) {
-        throw noAutorizado("Correo o contrasena incorrectos.");
-      }
-      const { token, expiraEn } = await iniciarSesion(doc);
+    // La logica y los eventos de seguridad viven en src/services/auth.service.js
+    login: async (_, { correo, password }, contexto) => {
+      const { token, expiraEn, doc } = await authService.login(correo, password, contexto);
       return { token, expiraEn, usuario: mapUsuario(doc) };
     },
 
     // Registro publico de compradores (rol CLIENTE). El comprador elige su
     // escuela del catalogo; por compatibilidad con la app tambien se acepta
     // una cafeteria, y se toma la escuela de esa cafeteria.
-    registro: async (_, { nombre, correo, password, escuelaId, cafeteriaId }) => {
+    registro: async (_, { nombre, correo, password, escuelaId, cafeteriaId }, contexto) => {
       let escuelaElegida = escuelaId;
       if (!escuelaElegida && cafeteriaId) {
         validarId(cafeteriaId, "cafeteria");
@@ -685,6 +678,7 @@ export const resolvers = {
         { nombre, correo, password },
         { rol: ROLES.CLIENTE, escuelaId: escuela._id }
       );
+      authService.auditarRegistro(doc, contexto);
       await sincronizarSinFallar(`el comprador ${doc.correo}`, () => sincronizarUsuario(doc));
       const { token, expiraEn } = await iniciarSesion(doc);
       return { token, expiraEn, usuario: mapUsuario(doc) };
