@@ -1,17 +1,129 @@
-# Topologia del proyecto: cuatro motores NoSQL en una red privada.
+# Topologia del proyecto: la API y el worker de auditoria en contenedores; las
+# bases de datos en la nube (MongoDB Atlas, Upstash Redis, Neo4j Aura,
+# CloudAMQP y ScyllaDB Cloud). Todas las conexiones salen del .env.
 #
-#   docker compose up -d
+#   docker compose up -d --build                            (todo en la nube)
+#   docker compose --profile scylla-local up -d --build     (+ ScyllaDB en contenedor)
+#   docker compose --profile rabbitmq-local up -d --build   (+ RabbitMQ en contenedor)
+#   docker compose --profile bd-local up -d --build         (+ Mongo, Redis y Neo4j en contenedor)
 #
-# La API (Apollo Server, puerto 4000) corre en la maquina host y se conecta
-# a los contenedores por los puertos publicados.
+# Los perfiles se combinan (--profile a --profile b) o se fijan en el .env con
+# COMPOSE_PROFILES=scylla-local,rabbitmq-local. Para usar un contenedor local,
+# en el .env apunta a el por su nombre de servicio (ej. amqp://guest:guest@rabbitmq:5672),
+# no a localhost: dentro de Docker "localhost" es el propio contenedor.
+#
+# La API y el worker corren en contenedores porque el driver oficial de
+# ScyllaDB (@scylladb/driver) solo funciona en Linux.
 
 services:
   # -------------------------------------------------------------
-  # MongoDB: persistencia transaccional y fuente de verdad
+  # API GraphQL (Apollo Server)
+  # -------------------------------------------------------------
+  api:
+    build: .
+    container_name: bda-api
+    restart: unless-stopped
+    # node --watch reinicia la API al guardar cambios en src/
+    command: node --watch src/index.js
+    ports:
+      - "4000:4000"
+    # MONGODB_URI, REDIS_URL, NEO4J_*, RABBITMQ_URL y SCYLLA_* salen del .env
+    env_file: .env
+    environment:
+      # Si SCYLLA_CONTACT_POINTS esta vacio se usa el contenedor local (perfil scylla-local)
+      SCYLLA_CONTACT_POINTS: ${SCYLLA_CONTACT_POINTS:-scylla:9042}
+    volumes:
+      - ./src:/app/src
+    # Los contenedores de bases de datos solo existen con su perfil; con la
+    # nube estas dependencias se ignoran.
+    depends_on: &dependencias
+      mongodb:
+        condition: service_started
+        required: false
+      redis-stack:
+        condition: service_started
+        required: false
+      neo4j:
+        condition: service_started
+        required: false
+      rabbitmq:
+        condition: service_started
+        required: false
+      # La API crea los keyspaces al arrancar: espera a que ScyllaDB acepte consultas
+      scylla:
+        condition: service_healthy
+        required: false
+    networks:
+      - bda-network
+
+  # -------------------------------------------------------------
+  # Worker de auditoria: consume RabbitMQ y guarda en ScyllaDB
+  # (auditoria.logs_eventos). Es un proceso aparte de la API.
+  # -------------------------------------------------------------
+  worker:
+    build: .
+    container_name: bda-worker
+    restart: unless-stopped
+    command: node --watch src/worker-auditoria.js
+    env_file: .env
+    environment:
+      SCYLLA_CONTACT_POINTS: ${SCYLLA_CONTACT_POINTS:-scylla:9042}
+    volumes:
+      - ./src:/app/src
+    depends_on: *dependencias
+    networks:
+      - bda-network
+
+  # -------------------------------------------------------------
+  # ScyllaDB local (respaldo de ScyllaDB Cloud): bitacora de pedidos,
+  # horas pico y auditoria de seguridad. Perfil: scylla-local
+  # (tarda ~1 minuto en arrancar la primera vez)
+  # -------------------------------------------------------------
+  scylla:
+    image: scylladb/scylla:6.2
+    container_name: bda-scylla
+    profiles: ["scylla-local"]
+    restart: unless-stopped
+    # Limita CPU y memoria para que corra en una laptop.
+    # developer-mode evita las pruebas de disco que pide produccion.
+    command: --smp 1 --memory 750M --overprovisioned 1 --developer-mode 1
+    ports:
+      - "9042:9042"     # Protocolo CQL (driver @scylladb/driver); cqlsh: docker exec -it bda-scylla cqlsh
+    healthcheck:
+      test: ["CMD-SHELL", "cqlsh -e 'DESCRIBE KEYSPACES' || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+    volumes:
+      - scylla_data:/var/lib/scylla
+    networks:
+      - bda-network
+
+  # -------------------------------------------------------------
+  # RabbitMQ local (respaldo de CloudAMQP): cola de eventos de seguridad.
+  # Perfil: rabbitmq-local. En el .env: RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672
+  # -------------------------------------------------------------
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    container_name: rabbitmq          # la prueba usa: docker stop rabbitmq
+    profiles: ["rabbitmq-local"]
+    restart: unless-stopped
+    ports:
+      - "5672:5672"     # Protocolo AMQP (amqplib)
+      - "15672:15672"   # RabbitMQ UI (guest / guest)
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq   # la cola durable sobrevive reinicios
+    networks:
+      - bda-network
+
+  # -------------------------------------------------------------
+  # MongoDB local (respaldo de Atlas). Perfil: bd-local
+  # Ojo: no es replica set, asi que crearPedido (transacciones) falla aqui.
   # -------------------------------------------------------------
   mongodb:
     image: mongo:8.0
     container_name: bda-mongodb
+    profiles: ["bd-local"]
     restart: unless-stopped
     ports:
       - "27017:27017"   # Protocolo nativo de MongoDB (driver de Mongoose)
@@ -24,11 +136,12 @@ services:
       - bda-network
 
   # -------------------------------------------------------------
-  # Redis Stack: cache Cache-Aside y sesiones JWT con TTL
+  # Redis Stack local (respaldo de Upstash). Perfil: bd-local
   # -------------------------------------------------------------
   redis-stack:
     image: redis/redis-stack:latest
     container_name: bda-redis-stack
+    profiles: ["bd-local"]
     restart: unless-stopped
     ports:
       - "6379:6379"     # Protocolo RESP (cliente node-redis)
@@ -41,11 +154,12 @@ services:
       - bda-network
 
   # -------------------------------------------------------------
-  # Neo4j: grafo de autorizacion RBAC
+  # Neo4j local (respaldo de Aura). Perfil: bd-local
   # -------------------------------------------------------------
   neo4j:
     image: neo4j:5.26
     container_name: bda-neo4j
+    profiles: ["bd-local"]
     restart: unless-stopped
     ports:
       - "7474:7474"     # Neo4j Browser (HTTP)
@@ -55,47 +169,7 @@ services:
       NEO4J_PLUGINS: '["apoc"]'
     volumes:
       - neo4j_data:/data
-      - ./neo4j:/var/lib/neo4j/import   # rbac.cypher queda disponible dentro del contenedor
-    networks:
-      - bda-network
-
-  # -------------------------------------------------------------
-  # Cassandra: bitacora de eventos de pedidos y metricas por hora
-  # (tarda ~1 minuto en arrancar la primera vez)
-  # -------------------------------------------------------------
-  cassandra:
-    image: cassandra:5.0
-    container_name: bda-cassandra
-    restart: unless-stopped
-    ports:
-      - "9042:9042"     # Protocolo CQL (cassandra-driver)
-    environment:
-      CASSANDRA_CLUSTER_NAME: bda-cluster
-      # Limita la memoria para que corra en una laptop
-      MAX_HEAP_SIZE: 512M
-      HEAP_NEWSIZE: 128M
-    healthcheck:
-      test: ["CMD-SHELL", "cqlsh -e 'DESCRIBE KEYSPACES' || exit 1"]
-      interval: 15s
-      timeout: 10s
-      retries: 10
-    volumes:
-      - cassandra_data:/var/lib/cassandra
-    networks:
-      - bda-network
-
-  # -------------------------------------------------------------
-  # RabbitMQ: cola de eventos de seguridad (auditoria asincrona)
-  # -------------------------------------------------------------
-  rabbitmq:
-    image: rabbitmq:3.13-management
-    container_name: rabbitmq          # la prueba usa: docker stop rabbitmq
-    restart: unless-stopped
-    ports:
-      - "5672:5672"     # Protocolo AMQP (amqplib)
-      - "15672:15672"   # RabbitMQ UI (guest / guest)
-    volumes:
-      - rabbitmq_data:/var/lib/rabbitmq   # la cola durable sobrevive reinicios
+      - ./neo4j:/var/lib/neo4j/import   # los scripts .cypher/.cql quedan disponibles dentro del contenedor
     networks:
       - bda-network
 
@@ -108,4 +182,4 @@ volumes:
   mongodb_data:
   redis_data:
   neo4j_data:
-  cassandra_data:
+  scylla_data:

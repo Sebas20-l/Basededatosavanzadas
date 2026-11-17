@@ -1,34 +1,57 @@
-// Cassandra: bitacora de eventos de pedidos y metricas por hora.
+// ScyllaDB: bitacora de eventos de pedidos y metricas por hora.
 //
-// Por que Cassandra y no MongoDB para esto: son escrituras que solo se agregan
+// Por que ScyllaDB y no MongoDB para esto: son escrituras que solo se agregan
 // (nunca se editan), llegan muchas a la vez y siempre se consultan por la misma
-// llave (un pedido, o una cafeteria en un dia). Cassandra esta hecha para eso:
+// llave (un pedido, o una cafeteria en un dia). ScyllaDB esta hecha para eso:
 // cada tabla se disena para UNA consulta y se particiona por esa llave.
 //
-// Variables en .env (opcionales):
-//   CASSANDRA_CONTACT_POINTS   (por defecto localhost:9042, el contenedor de docker-compose)
-//   CASSANDRA_DATACENTER       (por defecto datacenter1)
-//   ZONA_HORARIA               (por defecto America/Chihuahua; define el "dia" y la "hora")
+// Variables en .env (todas opcionales; sin ellas usa el contenedor de docker-compose):
+//   SCYLLA_CONTACT_POINTS   nodos separados por coma (por defecto localhost:9042)
+//   SCYLLA_DATACENTER       nombre del datacenter (por defecto datacenter1)
+//   SCYLLA_USER             usuario (ScyllaDB Cloud; el contenedor local no pide)
+//   SCYLLA_PASSWORD         contrasena (ScyllaDB Cloud)
+//   SCYLLA_REPLICAS         copias de cada dato (por defecto 1; en la nube 3)
+//   SCYLLA_SSL              "true" para cifrar la conexion (si el cluster lo pide)
+//   ZONA_HORARIA            (por defecto America/Chihuahua; define el "dia" y la "hora")
 //
-// Si Cassandra no esta disponible la API sigue funcionando: los eventos se
-// omiten (con aviso en consola) y los reportes de Cassandra responden con error.
+// Si ScyllaDB no esta disponible la API sigue funcionando: los eventos se
+// omiten (con aviso en consola) y los reportes de ScyllaDB responden con error.
+//
+// Se usa el driver oficial de ScyllaDB (@scylladb/driver). Solo funciona en
+// Linux, por eso la API corre en un contenedor de Docker (ver docker-compose.yml).
 
-import cassandra from "cassandra-driver";
+import scylla from "@scylladb/driver";
 import { GraphQLError } from "graphql";
 
 const KEYSPACE = "pide_y_recoge";
 const ZONA_HORARIA = process.env.ZONA_HORARIA || "America/Chihuahua";
 
-export const cassandraClient = new cassandra.Client({
-  contactPoints: (process.env.CASSANDRA_CONTACT_POINTS || "localhost:9042").split(","),
-  localDataCenter: process.env.CASSANDRA_DATACENTER || "datacenter1"
+const DATACENTER = process.env.SCYLLA_DATACENTER || "datacenter1";
+const REPLICAS = parseInt(process.env.SCYLLA_REPLICAS) || 1;
+
+// Replicacion de los keyspaces (tambien la usa auditoria.js)
+export const REPLICACION = `{'class': 'NetworkTopologyStrategy', '${DATACENTER}': ${REPLICAS}}`;
+
+const { types } = scylla;
+
+export const scyllaClient = new scylla.Client({
+  contactPoints: (process.env.SCYLLA_CONTACT_POINTS || "localhost:9042").split(",").map(p => p.trim()),
+  localDataCenter: DATACENTER,
+  // ScyllaDB Cloud pide usuario y contrasena; el contenedor local no
+  credentials: process.env.SCYLLA_USER
+    ? { username: process.env.SCYLLA_USER, password: process.env.SCYLLA_PASSWORD || "" }
+    : undefined,
+  sslOptions: process.env.SCYLLA_SSL === "true" ? {} : undefined
 });
 
 let disponible = false;
 
 const ESQUEMA = [
+  // NetworkTopologyStrategy funciona igual en local y en la nube. Los tablets se
+  // apagan porque ScyllaDB no permite tablas counter (ventas_por_hora) con tablets.
   `CREATE KEYSPACE IF NOT EXISTS ${KEYSPACE}
-   WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1}`,
+   WITH replication = ${REPLICACION}
+   AND tablets = {'enabled': false}`,
 
   // Consulta: "historial de un pedido". Particion = un pedido, ordenado por fecha.
   `CREATE TABLE IF NOT EXISTS ${KEYSPACE}.eventos_por_pedido (
@@ -54,7 +77,7 @@ const ESQUEMA = [
    ) WITH CLUSTERING ORDER BY (fecha DESC, pedido_id ASC)`,
 
   // Consulta: "horas pico de una cafeteria en un dia". Contadores (counter):
-  // Cassandra los incrementa sin leer antes, ideal para metricas.
+  // ScyllaDB los incrementa sin leer antes, ideal para metricas.
   `CREATE TABLE IF NOT EXISTS ${KEYSPACE}.ventas_por_hora (
      cafeteria_id text,
      dia date,
@@ -67,18 +90,18 @@ const ESQUEMA = [
    ) WITH CLUSTERING ORDER BY (hora ASC)`
 ];
 
-export async function conectarCassandra() {
+export async function conectarScylla() {
   try {
-    await cassandraClient.connect();
+    await scyllaClient.connect();
     for (const sentencia of ESQUEMA) {
-      await cassandraClient.execute(sentencia);
+      await scyllaClient.execute(sentencia);
     }
     disponible = true;
-    console.log("Cassandra conectado correctamente; keyspace:", KEYSPACE);
+    console.log("ScyllaDB conectado correctamente; keyspace:", KEYSPACE);
   } catch (error) {
     disponible = false;
     console.warn(
-      `AVISO: Cassandra no esta disponible (${error.message}). ` +
+      `AVISO: ScyllaDB no esta disponible (${error.message}). ` +
       "La API sigue funcionando, pero no se guardaran eventos ni metricas por hora."
     );
   }
@@ -91,9 +114,10 @@ export function diaYHora(fecha = new Date()) {
   return { dia, hora };
 }
 
-const aNumero = valor => (valor?.toNumber ? valor.toNumber() : Number(valor ?? 0));
+// Los contadores llegan como BigInt
+const aNumero = valor => Number(valor ?? 0);
 
-// Guarda un cambio de estado de un pedido. No lanza errores: si Cassandra
+// Guarda un cambio de estado de un pedido. No lanza errores: si ScyllaDB
 // falla, el pedido ya quedo guardado en MongoDB y solo se pierde la metrica.
 //   metricas: { pedidos, piezas, entregados, ingresosCentavos } a sumar en la hora
 export async function registrarEvento({ pedido, estado, usuarioId, fecha = new Date(), metricas = null }) {
@@ -104,7 +128,7 @@ export async function registrarEvento({ pedido, estado, usuarioId, fecha = new D
   const usuario = usuarioId ? String(usuarioId) : null;
 
   try {
-    await cassandraClient.batch(
+    await scyllaClient.batch(
       [
         {
           query: `INSERT INTO ${KEYSPACE}.eventos_por_pedido (pedido_id, fecha, estado, usuario_id, cafeteria_id)
@@ -117,12 +141,12 @@ export async function registrarEvento({ pedido, estado, usuarioId, fecha = new D
                   VALUES (?, ?, ?, ?, ?, ?, ?)`,
           params: [
             cafeteriaId,
-            cassandra.types.LocalDate.fromString(dia),
+            types.LocalDate.fromString(dia),
             fecha,
             pedidoId,
             estado,
             usuario,
-            cassandra.types.BigDecimal.fromString(String(pedido.total?.monto ?? 0))
+            types.BigDecimal.fromString(String(pedido.total?.monto ?? 0))
           ]
         }
       ],
@@ -131,32 +155,32 @@ export async function registrarEvento({ pedido, estado, usuarioId, fecha = new D
 
     if (metricas) {
       // Los contadores no pueden ir en el mismo batch que filas normales
-      await cassandraClient.execute(
+      await scyllaClient.execute(
         `UPDATE ${KEYSPACE}.ventas_por_hora
          SET pedidos = pedidos + ?, piezas = piezas + ?, entregados = entregados + ?,
              ingresos_centavos = ingresos_centavos + ?
          WHERE cafeteria_id = ? AND dia = ? AND hora = ?`,
         [
-          cassandra.types.Long.fromNumber(metricas.pedidos ?? 0),
-          cassandra.types.Long.fromNumber(metricas.piezas ?? 0),
-          cassandra.types.Long.fromNumber(metricas.entregados ?? 0),
-          cassandra.types.Long.fromNumber(metricas.ingresosCentavos ?? 0),
+          BigInt(metricas.pedidos ?? 0),
+          BigInt(metricas.piezas ?? 0),
+          BigInt(metricas.entregados ?? 0),
+          BigInt(metricas.ingresosCentavos ?? 0),
           cafeteriaId,
-          cassandra.types.LocalDate.fromString(dia),
+          types.LocalDate.fromString(dia),
           hora
         ],
         { prepare: true }
       );
     }
-    console.log(`[CASSANDRA] evento ${estado} del pedido ${pedidoId} (${dia} ${hora}:00)`);
+    console.log(`[SCYLLA] evento ${estado} del pedido ${pedidoId} (${dia} ${hora}:00)`);
   } catch (error) {
-    console.error(`[CASSANDRA] No se pudo guardar el evento ${estado} del pedido ${pedidoId}: ${error.message}`);
+    console.error(`[SCYLLA] No se pudo guardar el evento ${estado} del pedido ${pedidoId}: ${error.message}`);
   }
 }
 
-function requerirCassandra() {
+function requerirScylla() {
   if (!disponible) {
-    throw new GraphQLError("Los reportes de eventos no estan disponibles: Cassandra no esta conectado.", {
+    throw new GraphQLError("Los reportes de eventos no estan disponibles: ScyllaDB no esta conectado.", {
       extensions: { code: "SERVICE_UNAVAILABLE" }
     });
   }
@@ -174,8 +198,8 @@ function mapEvento(fila) {
 }
 
 export async function eventosDePedido(pedidoId) {
-  requerirCassandra();
-  const resultado = await cassandraClient.execute(
+  requerirScylla();
+  const resultado = await scyllaClient.execute(
     `SELECT * FROM ${KEYSPACE}.eventos_por_pedido WHERE pedido_id = ?`,
     [String(pedidoId)],
     { prepare: true }
@@ -184,22 +208,22 @@ export async function eventosDePedido(pedidoId) {
 }
 
 export async function eventosDeCafeteria(cafeteriaId, dia, limite = 100) {
-  requerirCassandra();
-  const resultado = await cassandraClient.execute(
+  requerirScylla();
+  const resultado = await scyllaClient.execute(
     `SELECT * FROM ${KEYSPACE}.eventos_por_cafeteria_dia
      WHERE cafeteria_id = ? AND dia = ? LIMIT ?`,
-    [String(cafeteriaId), cassandra.types.LocalDate.fromString(dia), limite],
+    [String(cafeteriaId), types.LocalDate.fromString(dia), limite],
     { prepare: true }
   );
   return resultado.rows.map(fila => ({ ...mapEvento(fila), cafeteriaId: String(cafeteriaId) }));
 }
 
 export async function ventasPorHora(cafeteriaId, dia) {
-  requerirCassandra();
-  const resultado = await cassandraClient.execute(
+  requerirScylla();
+  const resultado = await scyllaClient.execute(
     `SELECT hora, pedidos, piezas, entregados, ingresos_centavos FROM ${KEYSPACE}.ventas_por_hora
      WHERE cafeteria_id = ? AND dia = ?`,
-    [String(cafeteriaId), cassandra.types.LocalDate.fromString(dia)],
+    [String(cafeteriaId), types.LocalDate.fromString(dia)],
     { prepare: true }
   );
   return resultado.rows.map(fila => ({
