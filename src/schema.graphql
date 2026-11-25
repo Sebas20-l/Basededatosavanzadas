@@ -45,7 +45,20 @@ type Negocio {
   duenoId: ID!
   activo: Boolean!
   escuelas: [Escuela!]!
+  # Todas sus cafeterias, tambien las que aun no ven los alumnos
   cafeterias: [Cafeteria!]!
+  # Alta desde la app: EN_REVISION hasta que la plataforma lo aprueba
+  estado: EstadoNegocio!
+  motivoRechazo: String
+  dueno: Usuario
+  # Fecha ISO 8601 del registro
+  creadoEn: String
+}
+
+enum EstadoNegocio {
+  EN_REVISION
+  APROBADO
+  RECHAZADO
 }
 
 type Cafeteria {
@@ -274,6 +287,18 @@ input RegistroNegocioInput {
   dueno: CuentaInput!
 }
 
+# El dueno registra su cafeteria desde la app (sin codigo de escuela). La escuela
+# se manda por id (del catalogo) o por nombre; si no existe se crea con su ciudad.
+input RegistroCafeteriaInput {
+  dueno: CuentaInput!
+  nombreNegocio: String!
+  nombreCafeteria: String!
+  ubicacion: String
+  escuelaId: ID
+  nombreEscuela: String
+  ciudadEscuela: String
+}
+
 input DineroInput {
   monto: Float!
   moneda: String!
@@ -364,6 +389,10 @@ type Query {
   codigoInvitacion(escuelaId: ID!): String!
   # JEFE o VENDEDOR: el negocio al que pertenece la cuenta
   miNegocio: Negocio
+  # JEFE: los vendedores de sus cafeterias
+  misVendedores: [Usuario!]!
+  # ADMIN_PLATAFORMA: negocios por estado (ej. los que esperan aprobacion), mas nuevos primero
+  negociosPorEstado(estado: EstadoNegocio!): [Negocio!]!
 
   productosPorCafeteria(cafeteriaId: ID!): [Producto!]!
   # El mismo menu agrupado por categoria
@@ -435,10 +464,27 @@ type Mutation {
   registrarNegocio(input: RegistroNegocioInput!): RegistroNegocioPayload!
   # JEFE: su negocio entra a otra escuela con el codigo de esa escuela
   unirNegocioAEscuela(codigoInvitacion: String!): Negocio!
-  # JEFE: abre una cafeteria en una escuela donde ya esta su negocio
-  registrarCafeteria(escuelaId: ID!, nombre: String!, ubicacion: String): Cafeteria!
+  # JEFE: abre otra cafeteria. La escuela va por id o por nombre (si no existe se
+  # crea con ciudadEscuela). No hace falta codigo: el permiso de la escuela se
+  # arregla fuera de la app. Si el negocio esta en revision, la cafeteria se ve
+  # hasta que lo aprueben.
+  registrarCafeteria(
+    escuelaId: ID
+    nombre: String!
+    ubicacion: String
+    nombreEscuela: String
+    ciudadEscuela: String
+  ): Cafeteria!
   # JEFE: da de alta a un vendedor en una de sus cafeterias
   registrarVendedor(cafeteriaId: ID!, cuenta: CuentaInput!): Usuario!
+
+  # ---- Alta de cafeterias por su dueno ----
+  # Publico: crea el negocio (EN_REVISION), su primera cafeteria y la cuenta JEFE
+  registrarMiCafeteria(input: RegistroCafeteriaInput!): RegistroNegocioPayload!
+  # ADMIN_PLATAFORMA: aprueba el negocio; sus cafeterias aparecen a los alumnos
+  aprobarNegocio(negocioId: ID!): Negocio!
+  # ADMIN_PLATAFORMA: rechaza (o da de baja) el negocio; sus cafeterias se ocultan
+  rechazarNegocio(negocioId: ID!, motivo: String!): Negocio!
 
   # ADMIN_PLATAFORMA
   registrarMoneda(codigo: String!, nombre: String!, simbolo: String!, decimales: Int = 2): Moneda!

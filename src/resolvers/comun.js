@@ -52,7 +52,10 @@ export function mapNegocio(doc) {
     nombre: doc.nombre,
     duenoId: doc.duenoId,
     escuelaIds: doc.escuelaIds ?? [],
-    activo: doc.activo
+    activo: doc.activo,
+    estado: doc.estado ?? "APROBADO",
+    motivoRechazo: doc.motivoRechazo || null,
+    creadoEn: doc.createdAt ? doc.createdAt.toISOString() : null
   };
 }
 

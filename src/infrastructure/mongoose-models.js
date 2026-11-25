@@ -1,5 +1,6 @@
 import mongoose from "mongoose";
 import { ROLES, LISTA_ROLES } from "../domain/roles.js";
+import { ESTADOS_NEGOCIO, LISTA_ESTADOS_NEGOCIO } from "../domain/negocios.js";
 
 const esEntero = {
   validator: Number.isInteger,
@@ -83,12 +84,21 @@ export const EscuelaModel = mongoose.model("Escuela", EscuelaSchema);
 const NegocioSchema = new mongoose.Schema({
   nombre: { type: String, required: [true, "El negocio necesita un nombre."], trim: true },
   duenoId: { type: mongoose.Schema.Types.ObjectId, ref: "Usuario", required: true },
-  // Escuelas a las que el negocio entro con un codigo de invitacion
+  // Escuelas donde el negocio tiene cafeterias
   escuelaIds: [{ type: mongoose.Schema.Types.ObjectId, ref: "Escuela" }],
-  activo: { type: Boolean, default: true }
+  activo: { type: Boolean, default: true },
+  // Alta desde la app: queda EN_REVISION hasta que la plataforma lo aprueba.
+  // Los negocios creados antes de esto no tienen el campo y cuentan como APROBADO.
+  estado: {
+    type: String,
+    enum: { values: LISTA_ESTADOS_NEGOCIO, message: "El estado \"{VALUE}\" no existe." },
+    default: ESTADOS_NEGOCIO.APROBADO
+  },
+  motivoRechazo: { type: String, default: "", trim: true }
 }, { timestamps: true });
 
 NegocioSchema.index({ escuelaIds: 1 });
+NegocioSchema.index({ estado: 1, createdAt: -1 });
 
 export const NegocioModel = mongoose.model("Negocio", NegocioSchema);
 
