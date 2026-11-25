@@ -1,11 +1,18 @@
 // Registro multiempresa: escuelas, negocios, cafeterias y vendedores.
 //
-// Flujo (la escuela se registra primero):
-//   1. registrarEscuela   -> crea la escuela, su ADMIN_ESCUELA y un codigo de invitacion
-//   2. registrarNegocio   -> el dueno usa ese codigo: crea su negocio y su cuenta JEFE
-//   3. registrarCafeteria -> el JEFE da de alta sus cafeterias en esa escuela
-//   4. registrarVendedor  -> el JEFE da de alta a quien atiende cada cafeteria
-//   5. registro           -> los compradores eligen su escuela del catalogo (index.js)
+// Flujo desde la app (la cafeteria es un negocio independiente; la escuela solo
+// le da permiso de vender, fuera de la app, y el trato comercial es con el dueno):
+//   1. registrarMiCafeteria -> el dueno crea su negocio (EN_REVISION), su primera
+//                              cafeteria (oculta) y su cuenta JEFE
+//   2. aprobarNegocio       -> ADMIN_PLATAFORMA lo aprueba; sus cafeterias se ven
+//      rechazarNegocio      -> o lo rechaza con un motivo que ve el dueno
+//   3. registrarCafeteria   -> el JEFE abre mas cafeterias, en cualquier escuela
+//   4. registrarVendedor    -> el JEFE da de alta a quien atiende cada cafeteria
+//
+// Flujo anterior con codigo de invitacion (se conserva para el seed y la demo):
+//   registrarEscuela -> registrarNegocio (con codigo) -> unirNegocioAEscuela
+//   5. registro           -> los compradores eligen su escuela del catalogo o escriben
+//                            una nueva, que queda en el catalogo (index.js)
 
 import mongoose from "mongoose";
 import {
@@ -24,6 +31,20 @@ import {
   sincronizarSinFallar
 } from "../infrastructure/grafo.js";
 import { ROLES } from "../domain/roles.js";
+import {
+  NOMBRE_ESCUELA_MIN,
+  NOMBRE_ESCUELA_MAX,
+  CIUDAD_MAX,
+  limpiarTexto,
+  claveBaseDeNombre,
+  claveCandidata
+} from "../domain/escuelas.js";
+import {
+  ESTADOS_NEGOCIO,
+  MOTIVO_RECHAZO_MAX,
+  validarCambioEstadoNegocio,
+  cafeteriasVisibles
+} from "../domain/negocios.js";
 import { authService } from "../services/auth.service.js";
 import {
   datoInvalido,
@@ -55,6 +76,106 @@ async function escuelaPorCodigo(codigoInvitacion, session = null) {
   return escuela;
 }
 
+// Registro de compradores con la escuela escrita a mano: si ya existe una con
+// ese nombre (sin importar mayusculas ni acentos) se usa; si no, se crea con
+// clave y codigo de invitacion automaticos y queda en el catalogo para los
+// siguientes. Devuelve { escuela, nueva }.
+export async function buscarOCrearEscuela(nombreEscuela, ciudadEscuela, session = null) {
+  const nombre = limpiarTexto(nombreEscuela);
+  if (nombre.length < NOMBRE_ESCUELA_MIN || nombre.length > NOMBRE_ESCUELA_MAX) {
+    throw datoInvalido(
+      `El nombre de la escuela debe tener de ${NOMBRE_ESCUELA_MIN} a ${NOMBRE_ESCUELA_MAX} caracteres.`
+    );
+  }
+
+  // strength 1: "la salle" encuentra "La Salle" y "Tecnologico" a "Tecnológico"
+  const existente = await EscuelaModel.findOne({ nombre })
+    .collation({ locale: "es", strength: 1 })
+    .session(session);
+  if (existente) {
+    if (!existente.activa) {
+      throw datoInvalido(`La escuela "${existente.nombre}" esta suspendida.`);
+    }
+    return { escuela: existente, nueva: false };
+  }
+
+  const ciudad = limpiarTexto(ciudadEscuela);
+  if (!ciudad) {
+    throw datoInvalido("Escribe la ciudad de tu escuela.");
+  }
+  if (ciudad.length > CIUDAD_MAX) {
+    throw datoInvalido(`La ciudad debe tener como maximo ${CIUDAD_MAX} caracteres.`);
+  }
+
+  const base = claveBaseDeNombre(nombre);
+  let clave = null;
+  for (let intento = 1; intento <= 50 && !clave; intento++) {
+    const candidata = claveCandidata(base, intento);
+    const ocupada = await EscuelaModel.exists({ clave: candidata }).session(session);
+    if (!ocupada) clave = candidata;
+  }
+  if (!clave) {
+    throw new Error("No se pudo generar una clave para la escuela. Intenta de nuevo.");
+  }
+
+  const [escuela] = await EscuelaModel.create(
+    [{ clave, nombre, ciudad, codigoInvitacion: generarCodigoInvitacion(clave) }],
+    { session }
+  );
+  return { escuela, nueva: true };
+}
+
+// El JEFE de la sesion (con su negocio) y su permiso sobre ese negocio.
+async function jefeDeLaSesion(contexto) {
+  const { usuarioId } = requerirSesion(contexto);
+  const usuario = await UsuarioModel.findById(usuarioId);
+  if (!usuario?.negocioId || usuario.rol !== ROLES.JEFE) {
+    throw datoInvalido("Solo el dueno de un negocio puede hacer esto.");
+  }
+  await autorizar(contexto, "NEGOCIO_ADMINISTRAR", { negocioId: usuario.negocioId });
+  return usuario;
+}
+
+// Escuela por id (del catalogo) o por nombre escrito (se crea si no existe).
+async function escuelaElegida({ escuelaId, nombreEscuela, ciudadEscuela }, session = null) {
+  if (escuelaId) {
+    validarId(escuelaId, "escuela");
+    const escuela = await EscuelaModel.findById(escuelaId).session(session);
+    if (!escuela) throw datoInvalido("La escuela indicada no existe.");
+    if (!escuela.activa) throw datoInvalido("La escuela indicada esta suspendida.");
+    return { escuela, nueva: false };
+  }
+  if (nombreEscuela?.trim()) {
+    return buscarOCrearEscuela(nombreEscuela, ciudadEscuela, session);
+  }
+  throw datoInvalido("Elige la escuela donde esta la cafeteria.");
+}
+
+// Aprueba o rechaza un negocio y muestra u oculta sus cafeterias a los alumnos.
+async function cambiarEstadoNegocio(negocioId, nuevoEstado, motivo, contexto) {
+  validarId(negocioId, "negocio");
+  await autorizar(contexto, "PLATAFORMA_ADMINISTRAR");
+  const negocio = await NegocioModel.findById(negocioId);
+  if (!negocio) throw datoInvalido("El negocio no existe.");
+  try {
+    validarCambioEstadoNegocio(negocio.estado, nuevoEstado);
+  } catch (error) {
+    throw datoInvalido(error.message);
+  }
+
+  negocio.estado = nuevoEstado;
+  negocio.motivoRechazo = nuevoEstado === ESTADOS_NEGOCIO.RECHAZADO ? motivo : "";
+  await enTransaccion(async session => {
+    await negocio.save({ session });
+    await CafeteriaModel.updateMany(
+      { negocioId: negocio._id },
+      { $set: { activa: cafeteriasVisibles(nuevoEstado) } },
+      { session }
+    );
+  });
+  return mapNegocio(negocio);
+}
+
 async function sesionPayload(usuario) {
   const { token, expiraEn } = await iniciarSesion(usuario);
   return { token, expiraEn, usuario: mapUsuario(usuario) };
@@ -77,6 +198,10 @@ export const resolversMultiempresa = {
     cafeterias: async negocio => {
       const docs = await CafeteriaModel.find({ negocioId: negocio.id }).sort({ nombre: 1 });
       return docs.map(mapCafeteria);
+    },
+    dueno: async negocio => {
+      const doc = await UsuarioModel.findById(negocio.duenoId);
+      return doc ? mapUsuario(doc) : null;
     }
   },
 
@@ -125,6 +250,22 @@ export const resolversMultiempresa = {
       if (!usuario?.negocioId) return null;
       const negocio = await NegocioModel.findById(usuario.negocioId);
       return negocio ? mapNegocio(negocio) : null;
+    },
+
+    misVendedores: async (_, __, contexto) => {
+      const usuario = await jefeDeLaSesion(contexto);
+      const docs = await UsuarioModel.find({ negocioId: usuario.negocioId, rol: ROLES.VENDEDOR }).sort({ nombre: 1 });
+      return docs.map(mapUsuario);
+    },
+
+    negociosPorEstado: async (_, { estado }, contexto) => {
+      await autorizar(contexto, "PLATAFORMA_ADMINISTRAR");
+      // Los negocios de antes no tienen el campo: cuentan como aprobados
+      const filtro = estado === ESTADOS_NEGOCIO.APROBADO
+        ? { $or: [{ estado }, { estado: { $exists: false } }] }
+        : { estado };
+      const docs = await NegocioModel.find(filtro).sort({ createdAt: -1 });
+      return docs.map(mapNegocio);
     }
   },
 
@@ -240,43 +381,50 @@ export const resolversMultiempresa = {
       return mapNegocio(negocio);
     },
 
-    // El JEFE abre una cafeteria de su negocio en una escuela donde ya entro
-    registrarCafeteria: async (_, { escuelaId, nombre, ubicacion }, contexto) => {
-      validarId(escuelaId, "escuela");
+    // El JEFE abre otra cafeteria. No pide codigo: la cafeteria es un negocio
+    // independiente y el permiso de la escuela se arregla fuera de la app.
+    registrarCafeteria: async (_, { escuelaId, nombre, ubicacion, nombreEscuela, ciudadEscuela }, contexto) => {
       const { usuarioId } = requerirSesion(contexto);
       const usuario = await UsuarioModel.findById(usuarioId);
       if (!usuario?.negocioId) {
         throw datoInvalido("Solo el dueno de un negocio puede registrar cafeterias.");
       }
       await autorizar(contexto, "CAFETERIA_REGISTRAR", { negocioId: usuario.negocioId });
+      if (!nombre?.trim()) throw datoInvalido("La cafeteria necesita un nombre.");
 
-      const [escuela, negocio] = await Promise.all([
-        EscuelaModel.findById(escuelaId),
-        NegocioModel.findById(usuario.negocioId)
-      ]);
-      if (!escuela) throw datoInvalido("La escuela indicada no existe.");
-      if (!escuela.activa) throw datoInvalido("La escuela indicada esta suspendida.");
-      if (!negocio.escuelaIds.some(id => String(id) === String(escuelaId))) {
-        throw datoInvalido(
-          "Tu negocio no esta en esa escuela. Pide su codigo de invitacion y usa unirNegocioAEscuela."
+      let escuelaNueva = null;
+      const { doc, negocio } = await enTransaccion(async session => {
+        const { escuela, nueva } = await escuelaElegida({ escuelaId, nombreEscuela, ciudadEscuela }, session);
+        if (nueva) escuelaNueva = escuela;
+        const negocio = await NegocioModel.findByIdAndUpdate(
+          usuario.negocioId,
+          { $addToSet: { escuelaIds: escuela._id } },
+          { new: true, session }
         );
-      }
+        try {
+          const [doc] = await CafeteriaModel.create(
+            [{
+              nombre: nombre.trim(),
+              ubicacion: ubicacion?.trim() ?? "",
+              escuelaId: escuela._id,
+              negocioId: negocio._id,
+              // Mientras el negocio no este aprobado, los alumnos no la ven
+              activa: cafeteriasVisibles(negocio.estado)
+            }],
+            { session }
+          );
+          return { doc, negocio };
+        } catch (error) {
+          return manejarDuplicado(error, `"${escuela.nombre}" ya tiene una cafeteria llamada "${nombre.trim()}".`);
+        }
+      });
 
-      try {
-        const doc = await new CafeteriaModel({
-          nombre,
-          ubicacion: ubicacion ?? "",
-          escuelaId,
-          negocioId: negocio._id
-        }).save();
-        await sincronizarSinFallar(`la cafeteria ${doc.nombre}`, () => sincronizarCafeteria(doc));
-        return mapCafeteria(doc);
-      } catch (error) {
-        return manejarDuplicado(
-          error,
-          `La escuela "${escuela.clave}" ya tiene una cafeteria llamada "${nombre}".`
-        );
-      }
+      await sincronizarSinFallar(`la cafeteria ${doc.nombre}`, async () => {
+        if (escuelaNueva) await sincronizarEscuela(escuelaNueva);
+        await sincronizarNegocio(negocio);
+        await sincronizarCafeteria(doc);
+      });
+      return mapCafeteria(doc);
     },
 
     // El JEFE da de alta a un vendedor en una de sus cafeterias
@@ -295,6 +443,79 @@ export const resolversMultiempresa = {
       authService.auditarRegistro(doc, contexto);
       await sincronizarSinFallar(`el vendedor ${doc.correo}`, () => sincronizarUsuario(doc));
       return mapUsuario(doc);
+    },
+
+    // Publico: el dueno registra su cafeteria desde la app. Se crean el negocio
+    // (EN_REVISION), su primera cafeteria (oculta a los alumnos) y la cuenta
+    // JEFE, todo o nada. El equipo de la plataforma lo aprueba al cerrar el trato.
+    registrarMiCafeteria: async (_, { input }, contexto) => {
+      const { dueno, nombreNegocio, nombreCafeteria, ubicacion } = input;
+      if (!nombreNegocio?.trim()) throw datoInvalido("El negocio necesita un nombre.");
+      if (!nombreCafeteria?.trim()) throw datoInvalido("La cafeteria necesita un nombre.");
+
+      const negocioId = new mongoose.Types.ObjectId();
+      const duenoId = new mongoose.Types.ObjectId();
+      let escuelaNueva = null;
+
+      const { usuarioJefe, cafeteria } = await enTransaccion(async session => {
+        const { escuela, nueva } = await escuelaElegida(input, session);
+        if (nueva) escuelaNueva = escuela;
+
+        await NegocioModel.create(
+          [{
+            _id: negocioId,
+            nombre: nombreNegocio.trim(),
+            duenoId,
+            escuelaIds: [escuela._id],
+            estado: ESTADOS_NEGOCIO.EN_REVISION
+          }],
+          { session }
+        );
+        let cafeteria;
+        try {
+          [cafeteria] = await CafeteriaModel.create(
+            [{
+              nombre: nombreCafeteria.trim(),
+              ubicacion: ubicacion?.trim() ?? "",
+              escuelaId: escuela._id,
+              negocioId,
+              activa: false
+            }],
+            { session }
+          );
+        } catch (error) {
+          manejarDuplicado(error, `"${escuela.nombre}" ya tiene una cafeteria llamada "${nombreCafeteria.trim()}".`);
+        }
+        // El JEFE pertenece a la escuela de su primera cafeteria
+        const usuarioJefe = await crearCuenta(
+          dueno,
+          { _id: duenoId, rol: ROLES.JEFE, escuelaId: escuela._id, negocioId },
+          session
+        );
+        return { usuarioJefe, cafeteria };
+      });
+
+      authService.auditarRegistro(usuarioJefe, contexto);
+      const negocio = await NegocioModel.findById(negocioId);
+      await sincronizarSinFallar(`el negocio ${negocio.nombre}`, async () => {
+        if (escuelaNueva) await sincronizarEscuela(escuelaNueva);
+        await sincronizarNegocio(negocio);
+        await sincronizarCafeteria(cafeteria);
+        await sincronizarUsuario(usuarioJefe);
+      });
+      return { negocio: mapNegocio(negocio), sesion: await sesionPayload(usuarioJefe) };
+    },
+
+    aprobarNegocio: (_, { negocioId }, contexto) =>
+      cambiarEstadoNegocio(negocioId, ESTADOS_NEGOCIO.APROBADO, "", contexto),
+
+    rechazarNegocio: (_, { negocioId, motivo }, contexto) => {
+      const limpio = String(motivo ?? "").trim();
+      if (!limpio) throw datoInvalido("Escribe el motivo del rechazo para que el dueno lo vea.");
+      if (limpio.length > MOTIVO_RECHAZO_MAX) {
+        throw datoInvalido(`El motivo debe tener como maximo ${MOTIVO_RECHAZO_MAX} caracteres.`);
+      }
+      return cambiarEstadoNegocio(negocioId, ESTADOS_NEGOCIO.RECHAZADO, limpio, contexto);
     }
   }
 };

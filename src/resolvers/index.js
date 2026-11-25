@@ -48,7 +48,7 @@ import {
 } from "../infrastructure/auth.js";
 import { autorizar, puede } from "../infrastructure/autorizacion.js";
 import { prepararFirmaSubida } from "../infrastructure/cloudinary.js";
-import { sincronizarUsuario, sincronizarSinFallar } from "../infrastructure/grafo.js";
+import { sincronizarEscuela, sincronizarUsuario, sincronizarSinFallar } from "../infrastructure/grafo.js";
 import { resolversRbac } from "./rbac.js";
 import { authService } from "../services/auth.service.js";
 import { ROLES } from "../domain/roles.js";
@@ -63,7 +63,7 @@ import {
   mapUsuario,
   crearCuenta
 } from "./comun.js";
-import { resolversMultiempresa } from "./multiempresa.js";
+import { resolversMultiempresa, buscarOCrearEscuela } from "./multiempresa.js";
 import { resolversReportes } from "./reportes.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -653,9 +653,33 @@ export const resolvers = {
     },
 
     // Registro publico de compradores (rol CLIENTE). El comprador elige su
-    // escuela del catalogo; por compatibilidad con la app tambien se acepta
-    // una cafeteria, y se toma la escuela de esa cafeteria.
-    registro: async (_, { nombre, correo, password, escuelaId, cafeteriaId }, contexto) => {
+    // escuela del catalogo o escribe su nombre (si no existe, se crea y queda
+    // en el catalogo); por compatibilidad con la app tambien se acepta una
+    // cafeteria, y se toma la escuela de esa cafeteria.
+    registro: async (_, {
+      nombre, correo, password, escuelaId, cafeteriaId, nombreEscuela, ciudadEscuela
+    }, contexto) => {
+      if (!escuelaId && !cafeteriaId && nombreEscuela?.trim()) {
+        // Escuela y cuenta en una transaccion: si el correo ya existe, la
+        // escuela nueva no se queda creada sin nadie.
+        const { doc, escuela, nueva } = await enTransaccion(async session => {
+          const resultado = await buscarOCrearEscuela(nombreEscuela, ciudadEscuela, session);
+          const cuenta = await crearCuenta(
+            { nombre, correo, password },
+            { rol: ROLES.CLIENTE, escuelaId: resultado.escuela._id },
+            session
+          );
+          return { ...resultado, doc: cuenta };
+        });
+        authService.auditarRegistro(doc, contexto);
+        await sincronizarSinFallar(`el comprador ${doc.correo}`, async () => {
+          if (nueva) await sincronizarEscuela(escuela);
+          await sincronizarUsuario(doc);
+        });
+        const { token, expiraEn } = await iniciarSesion(doc);
+        return { token, expiraEn, usuario: mapUsuario(doc) };
+      }
+
       let escuelaElegida = escuelaId;
       if (!escuelaElegida && cafeteriaId) {
         validarId(cafeteriaId, "cafeteria");
