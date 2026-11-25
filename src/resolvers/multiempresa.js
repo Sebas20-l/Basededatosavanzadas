@@ -5,7 +5,8 @@
 //   2. registrarNegocio   -> el dueno usa ese codigo: crea su negocio y su cuenta JEFE
 //   3. registrarCafeteria -> el JEFE da de alta sus cafeterias en esa escuela
 //   4. registrarVendedor  -> el JEFE da de alta a quien atiende cada cafeteria
-//   5. registro           -> los compradores eligen su escuela del catalogo (index.js)
+//   5. registro           -> los compradores eligen su escuela del catalogo o escriben
+//                            una nueva, que queda en el catalogo (index.js)
 
 import mongoose from "mongoose";
 import {
@@ -24,6 +25,14 @@ import {
   sincronizarSinFallar
 } from "../infrastructure/grafo.js";
 import { ROLES } from "../domain/roles.js";
+import {
+  NOMBRE_ESCUELA_MIN,
+  NOMBRE_ESCUELA_MAX,
+  CIUDAD_MAX,
+  limpiarTexto,
+  claveBaseDeNombre,
+  claveCandidata
+} from "../domain/escuelas.js";
 import { authService } from "../services/auth.service.js";
 import {
   datoInvalido,
@@ -53,6 +62,55 @@ async function escuelaPorCodigo(codigoInvitacion, session = null) {
     throw datoInvalido("La escuela de este codigo esta suspendida.");
   }
   return escuela;
+}
+
+// Registro de compradores con la escuela escrita a mano: si ya existe una con
+// ese nombre (sin importar mayusculas ni acentos) se usa; si no, se crea con
+// clave y codigo de invitacion automaticos y queda en el catalogo para los
+// siguientes. Devuelve { escuela, nueva }.
+export async function buscarOCrearEscuela(nombreEscuela, ciudadEscuela, session = null) {
+  const nombre = limpiarTexto(nombreEscuela);
+  if (nombre.length < NOMBRE_ESCUELA_MIN || nombre.length > NOMBRE_ESCUELA_MAX) {
+    throw datoInvalido(
+      `El nombre de la escuela debe tener de ${NOMBRE_ESCUELA_MIN} a ${NOMBRE_ESCUELA_MAX} caracteres.`
+    );
+  }
+
+  // strength 1: "la salle" encuentra "La Salle" y "Tecnologico" a "Tecnológico"
+  const existente = await EscuelaModel.findOne({ nombre })
+    .collation({ locale: "es", strength: 1 })
+    .session(session);
+  if (existente) {
+    if (!existente.activa) {
+      throw datoInvalido(`La escuela "${existente.nombre}" esta suspendida.`);
+    }
+    return { escuela: existente, nueva: false };
+  }
+
+  const ciudad = limpiarTexto(ciudadEscuela);
+  if (!ciudad) {
+    throw datoInvalido("Escribe la ciudad de tu escuela.");
+  }
+  if (ciudad.length > CIUDAD_MAX) {
+    throw datoInvalido(`La ciudad debe tener como maximo ${CIUDAD_MAX} caracteres.`);
+  }
+
+  const base = claveBaseDeNombre(nombre);
+  let clave = null;
+  for (let intento = 1; intento <= 50 && !clave; intento++) {
+    const candidata = claveCandidata(base, intento);
+    const ocupada = await EscuelaModel.exists({ clave: candidata }).session(session);
+    if (!ocupada) clave = candidata;
+  }
+  if (!clave) {
+    throw new Error("No se pudo generar una clave para la escuela. Intenta de nuevo.");
+  }
+
+  const [escuela] = await EscuelaModel.create(
+    [{ clave, nombre, ciudad, codigoInvitacion: generarCodigoInvitacion(clave) }],
+    { session }
+  );
+  return { escuela, nueva: true };
 }
 
 async function sesionPayload(usuario) {

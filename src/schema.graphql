@@ -411,13 +411,17 @@ type Mutation {
   # Protegida: borra sesion:<jti> en Redis, el token queda revocado al instante
   logout: Boolean!
   # Registro publico de compradores (CLIENTE): crea la cuenta y ya devuelve su sesion.
-  # Se manda escuelaId (elegida del catalogo); cafeteriaId se acepta por compatibilidad.
+  # Se manda escuelaId (elegida del catalogo) o nombreEscuela (escrita a mano): si no
+  # existe una escuela con ese nombre se crea con ciudadEscuela y queda en el catalogo.
+  # cafeteriaId se acepta por compatibilidad.
   registro(
     nombre: String!
     correo: String!
     password: String!
     escuelaId: ID
     cafeteriaId: ID
+    nombreEscuela: String
+    ciudadEscuela: String
   ): SesionPayload!
 
   # ---- Multiempresa (la escuela se registra primero) ----
