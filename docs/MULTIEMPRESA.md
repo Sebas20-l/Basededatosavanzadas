@@ -169,11 +169,8 @@ Con `COMPOSE_PROFILES=scylla-local`, `docker compose up -d --build` también lev
 |---|---|---|
 | ADMIN_PLATAFORMA | `admin@cafeenlinea.mx` | — |
 | ADMIN_ESCUELA | `admin@ulsa.mx` / `admin@tec.mx` | ULSA / TEC |
-| JEFE | `jefe@ulsa.mx` | Los Latosos del Chef: 3 cafeterías en ULSA + 1 en TEC |
-| JEFE | `lupe@ulsa.mx` | Tortas Lupe (ULSA) |
+| JEFE | `jefe@ulsa.mx` | Los Latosos del Chef (Cafetería Los Latosos del Chef ULSA) |
 | VENDEDOR | `vendedor@ulsa.mx` | Cafetería Los Latosos del Chef ULSA |
-| VENDEDOR | `vendedor.norte@ulsa.mx` | Latosos Norte (sin molletes, para probar `dondeHay`) |
-| VENDEDOR | `vendedor.tec@tec.mx` / `vendedor.lupe@ulsa.mx` | Latosos TEC / Tortas Lupe |
 | CLIENTE | `demo@ulsa.mx` / `alumno@tec.mx` | ULSA / TEC |
 
 ## 6. Guion de demo (Apollo Sandbox)

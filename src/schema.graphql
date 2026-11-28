@@ -127,6 +127,8 @@ type Producto {
   imagenUrl: String
   destacado: Boolean!
   etiqueta: String!
+  # Solo para extras: categorias donde se ofrecen (ej. ["Café"]); vacia = en todo el menu
+  aplicaA: [String!]!
   # Minutos que tarda una orden; se usa para calcular la hora de recogida
   tiempoPreparacionMin: Int!
   # true si el vendedor lo pauso o ya no hay stock
@@ -320,6 +322,7 @@ input ProductoCambiosInput {
   imagenUrl: String
   destacado: Boolean
   etiqueta: String
+  aplicaA: [String!]
   disponible: Boolean
   tiempoPreparacionMin: Int
 }
@@ -499,6 +502,7 @@ type Mutation {
     imagenUrl: String
     destacado: Boolean
     etiqueta: String
+    aplicaA: [String!]
     tiempoPreparacionMin: Int
   ): Producto!
   # VENDEDOR o JEFE de la cafeteria: edita un platillo
