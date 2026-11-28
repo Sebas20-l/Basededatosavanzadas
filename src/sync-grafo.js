@@ -3,7 +3,9 @@
 //   npm run grafo
 //
 // 1. Carga el modelo RBAC de neo4j/rbac.cypher (roles, permisos, restricciones).
-// 2. Copia escuelas, negocios, cafeterias y usuarios con sus relaciones.
+// 2. Borra del grafo lo que ya no existe en MongoDB (por ejemplo, cuentas
+//    borradas a mano en Atlas), para que no queden ids ni correos viejos.
+// 3. Copia escuelas, negocios, cafeterias y usuarios con sus relaciones.
 // Es repetible: usa MERGE, asi que correrlo dos veces no duplica nada.
 
 import "dotenv/config";

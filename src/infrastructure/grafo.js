@@ -51,6 +51,9 @@ export async function sincronizarNegocio(negocio) {
     `MERGE (n:Negocio {id: $id})
      SET n.nombre = $nombre
      WITH n
+     OPTIONAL MATCH (n)-[viejas:OPERA_EN]->()
+     DELETE viejas
+     WITH DISTINCT n
      UNWIND $escuelaIds AS escuelaId
      MERGE (e:Escuela {id: escuelaId})
      MERGE (n)-[:OPERA_EN]->(e)`,
@@ -62,6 +65,11 @@ export async function sincronizarCafeteria(cafeteria) {
   await escrituraNeo4j([[
     `MERGE (c:Cafeteria {id: $id})
      SET c.nombre = $nombre
+     WITH c
+     OPTIONAL MATCH (c)-[escuela:PERTENECE_A]->()
+     OPTIONAL MATCH ()-[negocio:OPERA]->(c)
+     DELETE escuela, negocio
+     WITH DISTINCT c
      MERGE (e:Escuela {id: $escuelaId})
      MERGE (n:Negocio {id: $negocioId})
      MERGE (c)-[:PERTENECE_A]->(e)
@@ -88,6 +96,15 @@ export async function sincronizarUsuario(usuario) {
   };
 
   const consultas = [
+    [
+      // Si la cuenta se borro en MongoDB y se volvio a registrar, el grafo aun tiene
+      // el nodo con el id anterior y el mismo correo: se quita para no chocar con
+      // la restriccion de correo unico.
+      `MATCH (viejo:Usuario {correo: $correo})
+       WHERE viejo.id <> $id
+       DETACH DELETE viejo`,
+      parametros
+    ],
     [
       // El mismo nodo es :Usuario (permisos por accion) y :User (rutas y menu)
       `MERGE (u:Usuario {id: $id})
@@ -189,6 +206,27 @@ export async function reconstruirGrafo() {
     CafeteriaModel.find({}),
     UsuarioModel.find({})
   ]);
+  // MongoDB es la fuente de verdad: lo que se borro alla (a mano en Atlas, por
+  // ejemplo) tambien se borra del grafo, para que no queden permisos ni correos viejos.
+  const ids = lista => lista.map(doc => id(doc._id));
+  const huerfanos = {};
+  for (const [etiqueta, lista] of [
+    ["Usuario", usuarios], ["Cafeteria", cafeterias], ["Negocio", negocios], ["Escuela", escuelas]
+  ]) {
+    const registros = await lecturaNeo4j(
+      `MATCH (x:${etiqueta}) WHERE NOT x.id IN $ids RETURN x.id AS id`,
+      { ids: ids(lista) }
+    );
+    huerfanos[etiqueta] = registros.map(r => r.get("id"));
+    if (huerfanos[etiqueta].length) {
+      await escrituraNeo4j([[
+        `MATCH (x:${etiqueta}) WHERE x.id IN $ids DETACH DELETE x`,
+        { ids: huerfanos[etiqueta] }
+      ]]);
+    }
+  }
+  for (const usuarioId of huerfanos.Usuario) await invalidarPermisosUsuario(usuarioId);
+
   for (const escuela of escuelas) await sincronizarEscuela(escuela);
   for (const negocio of negocios) await sincronizarNegocio(negocio);
   for (const cafeteria of cafeterias) await sincronizarCafeteria(cafeteria);
@@ -198,7 +236,9 @@ export async function reconstruirGrafo() {
     escuelas: escuelas.length,
     negocios: negocios.length,
     cafeterias: cafeterias.length,
-    usuarios: usuarios.length
+    usuarios: usuarios.length,
+    // Nodos que ya no existian en MongoDB y se borraron del grafo
+    borrados: Object.values(huerfanos).reduce((total, lista) => total + lista.length, 0)
   };
 }
 
