@@ -226,6 +226,7 @@ if (usuariosSinRol.length) {
 //    se cobran aparte al elegir un producto).
 //  - destacado: true  -> sale en el carrusel de arriba.
 //  - etiqueta: insignia corta (ej. "Fuente de proteina").
+//  - aplicaA: solo en "Extras", categorias donde se ofrece (vacia = en todo el menu).
 //  - imagenUrl: URL de Cloudinary (Media Library > Copy URL). Vacia = sin foto.
 // El precio y el stock solo se guardan cuando el producto se crea por primera vez;
 // para cambiarlos despues, editalos en Atlas. El resto se actualiza en cada seed.
@@ -234,7 +235,7 @@ if (usuariosSinRol.length) {
 const STOCK_INICIAL = 50;
 const prod = (categoria, nombre, monto, descripcion = "", extra = {}) => ({
   nombre, monto, stock: STOCK_INICIAL, descripcion, categoria,
-  imagenUrl: "", destacado: false, etiqueta: "", ...extra
+  imagenUrl: "", destacado: false, etiqueta: "", aplicaA: [], ...extra
 });
 
 const HUEVOS = "Incluye frijoles, pan o tortilla (3 huevos por orden).";
@@ -242,88 +243,46 @@ const COMBO_BEBIDA = "Incluye café americano o té helado.";
 
 const productosMenu = [
   // ---- Café ----
-  prod("Café", "Latte", 65, "Suave, cremoso y con el perfecto toque de café.", { etiqueta: "Energía balanceada" }),
   prod("Café", "Americano con leche", 55, "Clásico, reconfortante y lleno de sabor.", { etiqueta: "Buena fuente de calcio" }),
-  prod("Café", "Americano", 30, "Intenso y natural, para los amantes del café puro.", { etiqueta: "Antioxidantes naturales" }),
 
   // ---- Bebidas ----
-  prod("Bebidas", "Agua natural 1 L", 20),
   prod("Bebidas", "Agua natural 500 ml", 15),
-  prod("Bebidas", "Agua mineral 1 L", 30),
-  prod("Bebidas", "Agua de sabor 1 L", 35),
-  prod("Bebidas", "Agua mineralizada con sabor 1 L", 35),
-  prod("Bebidas", "Agua de sabor 500 ml", 25),
-  prod("Bebidas", "Té helado (vaso 16 oz)", 25),
 
   // ---- Licuados ----
-  prod("Licuados", "Licuado de plátano", 45),
   prod("Licuados", "Licuado de fresa", 45),
-  prod("Licuados", "Licuado de mango", 45),
 
   // ---- Desayunos de huevos ----
-  prod("Desayunos de huevos", "Huevos al gusto", 75, HUEVOS),
-  prod("Desayunos de huevos", "Huevos a la mexicana", 75, HUEVOS),
-  prod("Desayunos de huevos", "Huevos con tocino", 75, HUEVOS),
-  prod("Desayunos de huevos", "Huevos con chorizo", 75, HUEVOS),
   prod("Desayunos de huevos", "Omelette a tu gusto", 80, "Con jamón, chorizo o queso a tu gusto.",
     { destacado: true, etiqueta: "Energía completa" }),
 
   // ---- Burritos ----
-  prod("Burritos", "Burrito de asada", 65),
   prod("Burritos", "Burrito alambre con pollo", 35, "", { destacado: true, etiqueta: "Fuente de proteína" }),
-  prod("Burritos", "Burrito alambre de res", 35),
-  prod("Burritos", "Burrito de picadillo con papas", 35),
-  prod("Burritos", "Burrito de frijoles con queso", 35),
-  prod("Burritos", "Burrito de papas con chorizo", 35),
-  prod("Burritos", "Burrito de costilla", 35),
-  prod("Burritos", "Burrito de chile colorado", 35),
 
   // ---- Tacos ----
-  prod("Tacos", "Tacos de rib eye (4)", 110, "Orden de 4 tacos."),
-  prod("Tacos", "Tacos de sirloin (4)", 110, "Orden de 4 tacos."),
   prod("Tacos", "Tacos de bistec (4)", 110, "Orden de 4 tacos.", { destacado: true, etiqueta: "Proteína de calidad" }),
-  prod("Tacos", "Tacos de guisado (5)", 80, "Orden de 5 tacos.", { destacado: true, etiqueta: "Caseros y sabrosos" }),
 
   // ---- Molletes ----
   prod("Molletes", "Molletes sencillos", 35),
-  prod("Molletes", "Molletes con huevo", 55),
-  prod("Molletes", "Molletes con guisado", 65),
 
   // ---- Guisados ----
   prod("Guisados", "Guisado de carne asada", 35),
-  prod("Guisados", "Guisado de costilla en salsa verde", 35),
-  prod("Guisados", "Guisado de picadillo", 35),
-  prod("Guisados", "Guisado de alambre de pollo", 35),
-  prod("Guisados", "Guisado de alambre de res", 35),
-  prod("Guisados", "Guisado de frijoles con queso", 35),
-  prod("Guisados", "Guisado de chile colorado", 35),
 
   // ---- Chilaquiles ----
   prod("Chilaquiles", "Chilaquiles con pollo", 70),
-  prod("Chilaquiles", "Chilaquiles con huevo", 80),
-  prod("Chilaquiles", "Chilaquiles con pollo y guisado", 90),
 
   // ---- Sándwiches ----
   prod("Sándwiches", "Sándwich de jamón", 65, "Con queso y verdura a tu gusto. En sándwich o cuernito."),
-  prod("Sándwiches", "Sándwich de pechuga de pavo", 65, "Con queso y verdura a tu gusto. En sándwich o cuernito."),
 
   // ---- Ensaladas ----
   prod("Ensaladas", "Ensalada César con pollo", 100, "Fresca y nutritiva.", { destacado: true, etiqueta: "Alta en fibra" }),
-  prod("Ensaladas", "Ensalada César sin pollo", 70, "Fresca y nutritiva."),
-  prod("Ensaladas", "Ensalada jardín", 60, "Fresca y nutritiva."),
 
   // ---- Combos (categoria especial) ----
   prod("Combos", "Combo 1", 55, "Burrito + bebida. " + COMBO_BEBIDA),
-  prod("Combos", "Combo 2", 95, "Chilaquiles + bebida. " + COMBO_BEBIDA),
-  prod("Combos", "Combo 3", 90, "Tacos (4) + bebida. " + COMBO_BEBIDA),
-  prod("Combos", "Combo 4", 110, "Ensalada + bebida. " + COMBO_BEBIDA),
-  prod("Combos", "Combo 5", 55, "Molletes + bebida. " + COMBO_BEBIDA),
 
   // ---- Extras (categoria especial) ----
-  prod("Extras", "Bebida de soya", 15),
-  prod("Extras", "Bebida de almendras", 15),
-  prod("Extras", "Bebida de avena", 15),
-  prod("Extras", "Queso extra", 15)
+  prod("Extras", "Queso extra", 15, "", {
+    aplicaA: ["Burritos", "Tacos", "Molletes", "Chilaquiles", "Sándwiches", "Desayunos de huevos"]
+  })
 ];
 // Minutos aproximados que tarda cada tipo de platillo (para la hora de recogida)
 const TIEMPO_PREPARACION = {
@@ -350,6 +309,7 @@ async function cargarMenu(cafeteriaDoc, lista) {
           imagenUrl: p.imagenUrl,
           destacado: p.destacado,
           etiqueta: p.etiqueta,
+          aplicaA: p.aplicaA,
           tiempoPreparacionMin: TIEMPO_PREPARACION[p.categoria] ?? 5
         }
       },
@@ -382,75 +342,23 @@ for (const p of productosMenu) {
 }
 
 // ---------------------------------------------------------------------------
-// MAS DATOS DE DEMO MULTIEMPRESA
-//  - "Los Latosos del Chef" tiene 3 cafeterias en la ULSA y 1 en el TEC
-//    (un dueno, varias cafeterias, varias escuelas).
-//  - "Tortas Lupe" es otro negocio de la ULSA, con su propio JEFE.
-//  - En "Latosos Norte" los molletes estan agotados: sirve para probar dondeHay.
+// MAS USUARIOS DE DEMO: la escuela TEC con su admin y un alumno.
+// La unica cafeteria de demo es "Cafetería Los Latosos del Chef ULSA"; las demas
+// se borraron de la base con src/limpiar-cafeterias.js.
 // ---------------------------------------------------------------------------
 const escuelaTec = await EscuelaModel.findOne({ clave: "TEC" });
-await NegocioModel.updateOne({ _id: negocio._id }, { $addToSet: { escuelaIds: escuelaTec._id } });
-
-async function cafeteriaDemo(escuela, negocioDoc, nombre, ubicacion) {
-  return CafeteriaModel.findOneAndUpdate(
-    { escuelaId: escuela._id, nombre },
-    { $set: { negocioId: negocioDoc._id }, $setOnInsert: { activa: true, ubicacion } },
-    { upsert: true, new: true }
-  );
-}
-
-// Menu corto (nombre del menu real -> stock inicial) para las cafeterias extra
-const MENU_CORTO = {
-  "Americano": 40, "Latte": 30, "Burrito de asada": 25, "Molletes sencillos": 20,
-  "Chilaquiles con pollo": 15, "Agua natural 500 ml": 60, "Combo 1": 20
-};
-const menuCorto = stocks =>
-  productosMenu.filter(p => p.nombre in stocks).map(p => ({ ...p, stock: stocks[p.nombre] }));
-
-const latososNorte = await cafeteriaDemo(escuelaDemo, negocio, "Latosos Norte", "Edificio de Ingenieria");
-const latososBiblioteca = await cafeteriaDemo(escuelaDemo, negocio, "Latosos Biblioteca", "Junto a la biblioteca");
-const latososTec = await cafeteriaDemo(escuelaTec, negocio, "Latosos TEC", "Centro estudiantil");
-await cargarMenu(latososNorte, menuCorto({ ...MENU_CORTO, "Molletes sencillos": 0 }));
-await cargarMenu(latososBiblioteca, menuCorto(MENU_CORTO));
-await cargarMenu(latososTec, menuCorto(MENU_CORTO));
-
-// Segundo negocio: el JEFE y su negocio se apuntan entre si (id reservado)
-const correoLupe = "lupe@ulsa.mx";
-const lupeId = (await UsuarioModel.findOne({ correo: correoLupe }))?._id ?? new mongoose.Types.ObjectId();
-const tortasLupe = await NegocioModel.findOneAndUpdate(
-  { nombre: "Tortas Lupe" },
-  { $set: { duenoId: lupeId, activo: true }, $addToSet: { escuelaIds: escuelaDemo._id } },
-  { upsert: true, new: true }
-);
-const cafeteriaLupe = await cafeteriaDemo(escuelaDemo, tortasLupe, "Tortas Lupe", "Explanada principal");
-await cargarMenu(cafeteriaLupe, [
-  prod("Tortas", "Torta de jamon", 55, "Con aguacate, jitomate y chile."),
-  prod("Tortas", "Torta cubana", 85, "Pierna, jamon, salchicha y queso.", { destacado: true, etiqueta: "La favorita" }),
-  prod("Tortas", "Torta de milanesa", 75),
-  prod("Bebidas", "Agua de sabor 500 ml", 25)
-]);
 
 const usuariosExtra = [
   ["admin@tec.mx", "Admin TEC", { rol: ROLES.ADMIN_ESCUELA, escuelaId: escuelaTec._id }],
-  ["vendedor.norte@ulsa.mx", "Vendedor Latosos Norte", {
-    rol: ROLES.VENDEDOR, escuelaId: escuelaDemo._id, negocioId: negocio._id, cafeteriaId: latososNorte._id
-  }],
-  ["vendedor.tec@tec.mx", "Vendedor Latosos TEC", {
-    rol: ROLES.VENDEDOR, escuelaId: escuelaTec._id, negocioId: negocio._id, cafeteriaId: latososTec._id
-  }],
-  [correoLupe, "Lupe (Tortas Lupe)", { rol: ROLES.JEFE, escuelaId: escuelaDemo._id, negocioId: tortasLupe._id }, lupeId],
-  ["vendedor.lupe@ulsa.mx", "Vendedor Tortas Lupe", {
-    rol: ROLES.VENDEDOR, escuelaId: escuelaDemo._id, negocioId: tortasLupe._id, cafeteriaId: cafeteriaLupe._id
-  }],
   ["alumno@tec.mx", "Alumno TEC", { rol: ROLES.CLIENTE, escuelaId: escuelaTec._id }]
 ];
 for (const [correo, nombre, ligas, idReservado] of usuariosExtra) {
   await usuarioDemo(correo, nombre, ligas, idReservado);
 }
 
-const cafeteriasDemo = [cafeteria, latososNorte, latososBiblioteca, latososTec, cafeteriaLupe];
+const cafeteriasDemo = [cafeteria];
 
-console.log(`  Negocios demo: ${negocio.nombre} (id = ${negocio._id}), ${tortasLupe.nombre} (id = ${tortasLupe._id})`);
+console.log(`  Negocio demo: ${negocio.nombre} (id = ${negocio._id})`);
 for (const c of cafeteriasDemo) {
   console.log(`  Cafeteria ${c.nombre}: id = ${c._id}`);
 }
