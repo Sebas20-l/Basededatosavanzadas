@@ -128,10 +128,19 @@ function mapProducto(doc) {
     imagenUrl: doc.imagenUrl || null,
     destacado: doc.destacado ?? false,
     etiqueta: doc.etiqueta ?? "",
+    aplicaA: doc.aplicaA ?? [],
     tiempoPreparacionMin: doc.tiempoPreparacionMin ?? 5,
     agotado: !doc.disponible || doc.inventario.stock <= 0,
     cafeteriaId: doc.cafeteriaId
   };
+}
+
+// Categorias donde se ofrece un extra: sin espacios sobrantes, vacias ni repetidas.
+function categoriasLimpias(lista) {
+  const vistas = new Set();
+  return (lista ?? [])
+    .map(c => String(c).trim())
+    .filter(c => c && !vistas.has(c.toLowerCase()) && vistas.add(c.toLowerCase()));
 }
 
 // Valida y normaliza un precio contra el catalogo de monedas.
@@ -728,7 +737,7 @@ export const resolvers = {
     // ---- Productos e inventario ----
     registrarProducto: async (_, {
       nombre, precio, disponible, inventario, cafeteriaId,
-      descripcion, categoria, imagenUrl, destacado, etiqueta, tiempoPreparacionMin
+      descripcion, categoria, imagenUrl, destacado, etiqueta, aplicaA, tiempoPreparacionMin
     }, contexto) => {
       validarId(cafeteriaId, "cafeteria");
       // Solo quien vende en esa cafeteria (o su jefe) puede agregar al menu
@@ -769,6 +778,7 @@ export const resolvers = {
         imagenUrl,
         destacado,
         etiqueta,
+        aplicaA: categoriasLimpias(aplicaA),
         tiempoPreparacionMin: productoDominio.tiempoPreparacionMin,
         cafeteriaId
       }).save().catch(error => { throw validacionMongoose(error); });
@@ -792,6 +802,9 @@ export const resolvers = {
         if (cambios[campo] !== undefined && cambios[campo] !== null) {
           producto[campo] = cambios[campo];
         }
+      }
+      if (cambios.aplicaA !== undefined && cambios.aplicaA !== null) {
+        producto.aplicaA = categoriasLimpias(cambios.aplicaA);
       }
       if (cambios.precio) {
         producto.precio = await precioValidado(cambios.precio);

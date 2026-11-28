@@ -216,6 +216,9 @@ const ProductoSchema = new mongoose.Schema({
   destacado: { type: Boolean, default: false },
   // Etiqueta corta opcional (ej. "Nuevo", "Mas vendido")
   etiqueta: { type: String, default: "", trim: true },
+  // Solo para la categoria "Extras": categorias del menu donde se ofrece el extra
+  // (ej. ["Café", "Licuados"] para la leche de soya). Vacia = se ofrece en todo el menu.
+  aplicaA: { type: [{ type: String, trim: true }], default: [] },
   // Minutos que tarda en prepararse una orden; sirve para calcular la hora de recogida
   tiempoPreparacionMin: {
     type: Number,
